@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+bot.log
+._*
+
+gc-register-ai-7d171ca6fafc.json
