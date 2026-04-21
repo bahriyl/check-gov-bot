@@ -19,6 +19,8 @@ class ParsedReceipt:
     receipt_code: str | None
     confidence: float = 0.0
     raw_text: str = ""
+    amount: str | None = None
+    card_number: str | None = None
 
 
 @dataclass
