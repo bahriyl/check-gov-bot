@@ -6,6 +6,7 @@ from threading import Lock
 
 from playwright.sync_api import sync_playwright
 
+from app.payment_data import parse_check_gov_payment
 from app.types import CheckResult, CheckStatus
 
 
@@ -179,11 +180,17 @@ class CheckGovChecker:
 
                 last_result = (status_code, data, raw_text)
                 if isinstance(data, dict) and data.get("payments"):
+                    payment = parse_check_gov_payment(data)
                     return CheckResult(
                         status=CheckStatus.VALID,
                         source="check.gov.ua",
                         message="Платіж знайдено",
-                        details={**data, "http_status": status_code, "provider_code": current_provider},
+                        details={
+                            **data,
+                            "http_status": status_code,
+                            "provider_code": current_provider,
+                            "payment": payment,
+                        },
                     )
 
                 if self._is_retryable_einfo(data):

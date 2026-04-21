@@ -5,7 +5,7 @@ Telegram bot (Python + `pytelegrambotapi`) that validates bank receipts from pho
 ## What it does
 
 - Accepts receipt image from Telegram chat
-- Supports Binance active-order chat scan via `/active_orders_receipts`
+- Supports Binance order chat scan via `/active_orders` and `/test_active_orders`
 - Runs OCR with configurable provider:
   - `PaddleOCR` (`OCR_PROVIDER=paddle`)
   - Google Document AI (`OCR_PROVIDER=docai`)
@@ -35,8 +35,7 @@ For Binance active-order chat scan set:
 - `BINANCE_API_KEY`
 - `BINANCE_SECRET_KEY`
 - Optional: `BINANCE_BASE_URL`, `BINANCE_TIMEOUT_SECONDS`
-- Optional test mode: `BINANCE_TEST_INCLUDE_LATEST_NON_ACTIVE=true` (if no active orders, process latest history orders)
-- Optional test mode count: `BINANCE_TEST_LATEST_NON_ACTIVE_COUNT=1` (how many latest non-active orders to check)
+- Optional targeted test mode: `BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS=123,456` (comma-separated non-active order numbers for `/test_active_orders`)
 
 If using Google Document AI, configure these env vars:
 
@@ -52,8 +51,21 @@ If using Google Document AI, configure these env vars:
 rtk .venv/bin/python main.py
 ```
 
-Use `/active_orders_receipts` in Telegram to fetch active Binance orders, scan image messages in each order chat, and validate detected receipts.
-For amount reliability, receipt amount is resolved from chat text (card-aware nearest-message matching), with normalization like `1 200.00 -> 1200`.
+Use `/active_orders` in Telegram to fetch active Binance orders, scan image messages in each order chat, and validate detected receipts.
+Use `/test_active_orders` to run scan only for non-active order numbers from `BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS`.
+Menu buttons in chat:
+- `Перевірити квитанцію`
+- `Перевірити активні ордери`
+
+## Amount And Card Source
+
+Amount and recipient card are not extracted from OCR text.
+
+Source of truth is provider verification APIs:
+- `check.gov.ua /api/handler`: first payment object (`payments[0]`), including `recipient` and `amount`.
+- `privatbank.ua /pb/ajax/find-document`: on success, bot uses `token` to download receipt PDF and extracts amount/card from PDF text.
+
+Bot stores normalized provider payment data inside `CheckResult.details["payment"]`.
 
 ## Notes
 
@@ -67,4 +79,12 @@ To run OCR validation on images in `examples/`:
 
 ```bash
 rtk proxy sh -lc 'RUN_OCR_EXAMPLES=1 .venv/bin/python -m unittest tests/test_ocr_examples.py -v'
+```
+
+## Tests
+
+Run full suite:
+
+```bash
+rtk .venv/bin/python -m unittest discover -s tests -v
 ```

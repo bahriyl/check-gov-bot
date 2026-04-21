@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import ocr
+from app.ocr import OCRPayload
 
 
 class OcrProviderRoutingTests(unittest.TestCase):
@@ -14,12 +15,12 @@ class OcrProviderRoutingTests(unittest.TestCase):
         self.assertEqual(text, "paddle-text")
         mock_paddle.assert_called_once()
 
-    @patch("app.ocr._extract_text_docai", return_value="docai-text")
-    def test_routes_to_docai(self, mock_docai) -> None:
+    @patch("app.ocr._extract_docai_payload", return_value=OCRPayload(text="docai-text", provider="docai", docai_document={"text": "docai-text"}))
+    def test_routes_to_docai(self, mock_docai_payload) -> None:
         with patch.dict(os.environ, {"OCR_PROVIDER": "docai"}, clear=False):
             text = ocr.extract_text(Path("dummy.jpg"))
         self.assertEqual(text, "docai-text")
-        mock_docai.assert_called_once()
+        mock_docai_payload.assert_called_once()
 
 
 if __name__ == "__main__":

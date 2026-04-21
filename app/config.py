@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 
 
@@ -12,8 +12,7 @@ class Settings:
     binance_timeout_seconds: int = 20
     binance_api_key: str | None = None
     binance_secret_key: str | None = None
-    binance_test_include_latest_non_active: bool = False
-    binance_test_latest_non_active_count: int = 1
+    binance_test_non_active_order_numbers: list[str] = field(default_factory=list)
     ocr_provider: str = "paddle"
     docai_timeout_seconds: int = 30
     google_application_credentials: str | None = None
@@ -30,15 +29,11 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _env_int(name: str, default: int, min_value: int = 1) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw.strip())
-    except ValueError:
-        return default
-    return value if value >= min_value else default
+def _env_csv(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    items = [item.strip() for item in raw.split(",")]
+    # Keep input order while dropping empty values and duplicates.
+    return list(dict.fromkeys([item for item in items if item]))
 
 
 
@@ -61,8 +56,7 @@ def load_settings() -> Settings:
         binance_timeout_seconds=int(os.getenv("BINANCE_TIMEOUT_SECONDS", "20")),
         binance_api_key=os.getenv("BINANCE_API_KEY"),
         binance_secret_key=os.getenv("BINANCE_SECRET_KEY"),
-        binance_test_include_latest_non_active=_env_bool("BINANCE_TEST_INCLUDE_LATEST_NON_ACTIVE", False),
-        binance_test_latest_non_active_count=_env_int("BINANCE_TEST_LATEST_NON_ACTIVE_COUNT", 1, min_value=1),
+        binance_test_non_active_order_numbers=_env_csv("BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS"),
         ocr_provider=ocr_provider,
         docai_timeout_seconds=int(os.getenv("DOCAI_TIMEOUT_SECONDS", "30")),
         google_application_credentials=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),

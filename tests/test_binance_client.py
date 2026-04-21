@@ -62,26 +62,36 @@ class BinanceClientTests(unittest.TestCase):
         self.assertEqual(messages[1].image_url, "https://example.com/1.jpg")
 
     @patch("app.binance.requests.get")
-    def test_get_latest_orders_from_history_returns_newest_first(self, mock_get) -> None:
-        mock_get.return_value = FakeResponse(
-            {
-                "data": [
-                    {"orderNumber": "old", "tradeType": "SELL", "amount": "10", "createTime": 100},
-                    {"orderNumber": "new", "tradeType": "BUY", "amount": "20", "createTime": 200},
-                ]
-            }
-        )
-        orders = self.client.get_latest_orders_from_history(limit=2)
-        self.assertEqual(len(orders), 2)
-        self.assertEqual(orders[0].order_number, "new")
-        self.assertEqual(orders[0].trade_type, "BUY")
-        self.assertEqual(orders[1].order_number, "old")
+    def test_get_orders_from_history_by_numbers(self, mock_get) -> None:
+        mock_get.side_effect = [
+            FakeResponse(
+                {
+                    "data": [
+                        {"orderNumber": "1002", "tradeType": "BUY", "amount": "20", "createTime": 200},
+                        {"orderNumber": "9999", "tradeType": "SELL", "amount": "10", "createTime": 100},
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "data": [
+                        {"orderNumber": "1001", "tradeType": "SELL", "amount": "30", "createTime": 300},
+                    ]
+                }
+            ),
+        ]
+        orders = self.client.get_orders_from_history_by_numbers(["1001", "1002"], rows=2)
+        self.assertEqual([order.order_number for order in orders], ["1001", "1002"])
+        self.assertEqual([order.trade_type for order in orders], ["SELL", "BUY"])
 
     @patch("app.binance.requests.get")
-    def test_get_latest_orders_from_history_empty(self, mock_get) -> None:
-        mock_get.return_value = FakeResponse({"data": []})
-        orders = self.client.get_latest_orders_from_history(limit=3)
-        self.assertEqual(orders, [])
+    def test_get_orders_from_history_by_numbers_missing_returns_found_only(self, mock_get) -> None:
+        mock_get.side_effect = [
+            FakeResponse({"data": [{"orderNumber": "1002", "tradeType": "BUY", "amount": "20", "createTime": 200}]}),
+            FakeResponse({"data": []}),
+        ]
+        orders = self.client.get_orders_from_history_by_numbers(["1001", "1002"], rows=1)
+        self.assertEqual([order.order_number for order in orders], ["1002"])
 
 
 if __name__ == "__main__":

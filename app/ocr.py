@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 import os
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
 
 class OCRError(RuntimeError):
     pass
+
+
+@dataclass
+class OCRPayload:
+    text: str
+    provider: str
+    docai_document: dict[str, Any] | None = None
 
 
 @lru_cache(maxsize=1)
@@ -116,6 +125,11 @@ def _extract_text_paddle(image_path: Path) -> str:
 
 
 def _extract_text_docai(image_path: Path) -> str:
+    payload = _extract_docai_payload(image_path)
+    return payload.text
+
+
+def _extract_docai_payload(image_path: Path) -> OCRPayload:
     credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
     project_id = os.getenv("DOCAI_PROJECT_ID", "").strip()
     location = os.getenv("DOCAI_LOCATION", "").strip()
@@ -141,6 +155,7 @@ def _extract_text_docai(image_path: Path) -> str:
         from google.api_core.client_options import ClientOptions
         from google.oauth2 import service_account
         from google.cloud import documentai
+        from google.protobuf.json_format import MessageToDict
     except Exception as exc:
         raise OCRError(
             "Google Document AI dependencies are missing. "
@@ -178,17 +193,24 @@ def _extract_text_docai(image_path: Path) -> str:
     text = (result.document.text or "").strip()
     if not text:
         raise OCRError("No OCR text extracted")
-    return _normalize_text(text)
+    try:
+        doc_dict = MessageToDict(result.document._pb, preserving_proto_field_name=True)
+    except Exception:
+        doc_dict = {"text": text}
+    return OCRPayload(text=_normalize_text(text), provider="docai", docai_document=doc_dict)
 
 
-def extract_text(image_path: Path) -> str:
+def extract_ocr_payload(image_path: Path) -> OCRPayload:
     provider = os.getenv("OCR_PROVIDER", "paddle").strip().lower() or "paddle"
     if provider == "docai":
         try:
-            return _extract_text_docai(image_path)
+            return _extract_docai_payload(image_path)
         except OCRError:
-            # Keep bot working if Document AI is temporarily unavailable/misconfigured.
-            return _extract_text_paddle(image_path)
+            return OCRPayload(text=_extract_text_paddle(image_path), provider="paddle")
     if provider == "paddle":
-        return _extract_text_paddle(image_path)
+        return OCRPayload(text=_extract_text_paddle(image_path), provider="paddle")
     raise OCRError("Unsupported OCR_PROVIDER. Use: paddle or docai")
+
+
+def extract_text(image_path: Path) -> str:
+    return extract_ocr_payload(image_path).text

@@ -137,30 +137,45 @@ class BinanceP2PClient:
 
         return self._map_orders(all_orders)
 
-    def get_latest_orders_from_history(self, limit: int = 1, rows: int = 100) -> list[BinanceOrder]:
-        if limit <= 0:
+    def get_orders_from_history_by_numbers(self, order_numbers: list[str], rows: int = 100) -> list[BinanceOrder]:
+        requested = list(dict.fromkeys([num.strip() for num in order_numbers if num and num.strip()]))
+        if not requested:
             return []
+
         endpoint = f"{self.base_url}/sapi/v1/c2c/orderMatch/listUserOrderHistory"
-        query = self._sign_query({"page": 1, "rows": max(rows, limit)})
-        resp = requests.get(
-            endpoint,
-            params=query,
-            headers=self._headers(),
-            timeout=self.timeout_seconds,
-        )
-        try:
-            payload = resp.json()
-        except Exception as exc:  # pragma: no cover
-            raise BinanceAPIError(f"Failed to decode Binance order history response: {exc}") from exc
+        page = 1
+        requested_set = set(requested)
+        found: dict[str, BinanceOrder] = {}
 
-        if resp.status_code >= 400:
-            raise BinanceAPIError(f"Binance history error HTTP {resp.status_code}: {payload}")
+        while True:
+            query = self._sign_query({"page": page, "rows": rows})
+            resp = requests.get(
+                endpoint,
+                params=query,
+                headers=self._headers(),
+                timeout=self.timeout_seconds,
+            )
+            try:
+                payload = resp.json()
+            except Exception as exc:  # pragma: no cover
+                raise BinanceAPIError(f"Failed to decode Binance order history response: {exc}") from exc
 
-        items = self._extract_rows(payload)
-        if not items:
-            return []
-        mapped = self._map_orders(items)
-        return mapped[:limit]
+            if resp.status_code >= 400:
+                raise BinanceAPIError(f"Binance history error HTTP {resp.status_code}: {payload}")
+
+            items = self._extract_rows(payload)
+            if not items:
+                break
+
+            for order in self._map_orders(items):
+                if order.order_number in requested_set and order.order_number not in found:
+                    found[order.order_number] = order
+
+            if len(found) == len(requested_set) or len(items) < rows:
+                break
+            page += 1
+
+        return [found[num] for num in requested if num in found]
 
     def get_chat_messages(self, order_number: str, rows: int = 100) -> list[BinanceChatMessage]:
         endpoint = f"{self.base_url}/sapi/v1/c2c/chat/retrieveChatMessagesWithPagination"
