@@ -142,11 +142,8 @@ class ReceiptBot:
 
         provider_code = parsed.provider_code
         if not provider_code:
-            return CheckResult(
-                status=CheckStatus.UNPARSEABLE,
-                source="local",
-                message="Не вдалося визначити банк/сервіс квитанції",
-            )
+            # If OCR found only receipt code, still try check.gov provider probing.
+            return self.check_gov_checker.check("", parsed.receipt_code)
 
         return self.check_gov_checker.check(provider_code, parsed.receipt_code)
 
