@@ -51,11 +51,11 @@ If using Google Document AI, configure these env vars:
 rtk .venv/bin/python main.py
 ```
 
-Use `/active_orders` in Telegram to fetch active Binance orders, scan image messages in each order chat, and validate detected receipts.
+Use `/active_orders` in Telegram to choose order side (`Купівля`, `Продаж`, `Усі`), then scan matching active Binance orders, image messages in each order chat, and validate detected receipts.
 Use `/test_active_orders` to run scan only for non-active order numbers from `BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS`.
 Menu buttons in chat:
 - `Перевірити квитанцію`
-- `Перевірити активні ордери`
+- `Перевірити активні ордери` (opens the same side selection: `Купівля`, `Продаж`, `Усі`)
 
 ## Amount And Card Source
 

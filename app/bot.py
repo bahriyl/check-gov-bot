@@ -53,7 +53,7 @@ class ReceiptBot:
 
         @self.bot.message_handler(commands=["active_orders"])
         def _active_orders(message: telebot.types.Message) -> None:
-            self._handle_orders_scan(message, test_mode=False)
+            self._prompt_active_orders_selection(message)
 
         @self.bot.message_handler(commands=["test_active_orders"])
         def _test_active_orders(message: telebot.types.Message) -> None:
@@ -65,7 +65,11 @@ class ReceiptBot:
 
         @self.bot.message_handler(func=lambda message: (message.text or "").strip() == "Перевірити активні ордери")
         def _check_active_orders_button(message: telebot.types.Message) -> None:
-            self._handle_orders_scan(message, test_mode=False)
+            self._prompt_active_orders_selection(message)
+
+        @self.bot.callback_query_handler(func=lambda call: (call.data or "").startswith("active_orders:"))
+        def _active_orders_filter_callback(call: telebot.types.CallbackQuery) -> None:
+            self._handle_active_orders_filter_callback(call)
 
         @self.bot.message_handler(content_types=["photo", "document"])
         def _handle_receipt(message: telebot.types.Message) -> None:
@@ -190,6 +194,27 @@ class ReceiptBot:
         )
         return markup
 
+    @staticmethod
+    def _trade_type_label(trade_type: str) -> str:
+        return "Купівля" if trade_type.upper() == "BUY" else "Продаж"
+
+    def _build_active_orders_filter_menu(self) -> InlineKeyboardMarkup:
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton(text="Купівля", callback_data="active_orders:buy"),
+            InlineKeyboardButton(text="Продаж", callback_data="active_orders:sell"),
+            InlineKeyboardButton(text="Усі", callback_data="active_orders:all"),
+        )
+        return markup
+
+    def _prompt_active_orders_selection(self, message: telebot.types.Message) -> None:
+        self.bot.send_message(
+            message.chat.id,
+            "Оберіть тип ордерів для перевірки:",
+            reply_markup=self._build_active_orders_filter_menu(),
+            reply_to_message_id=message.message_id,
+        )
+
     def _format_reply(self, parsed: ParsedReceipt, result: CheckResult) -> str:
         status_emoji = {
             CheckStatus.VALID: "✅",
@@ -268,7 +293,12 @@ class ReceiptBot:
         result = self._run_check(parsed)
         return parsed, result
 
-    def _handle_orders_scan(self, message: telebot.types.Message, test_mode: bool) -> None:
+    def _handle_orders_scan(
+        self,
+        message: telebot.types.Message,
+        test_mode: bool,
+        trade_type_filter: str | None = None,
+    ) -> None:
         if not self.binance_client:
             self.bot.reply_to(
                 message,
@@ -276,7 +306,13 @@ class ReceiptBot:
             )
             return
 
+        trade_type_filter_norm = (trade_type_filter or "").strip().upper()
+        if trade_type_filter_norm not in {"BUY", "SELL"}:
+            trade_type_filter_norm = ""
+
         progress_label = "тестові неактивні" if test_mode else "активні"
+        if trade_type_filter_norm:
+            progress_label = f"{progress_label} ({self._trade_type_label(trade_type_filter_norm)})"
         progress = self.bot.send_message(message.chat.id, f"🔄 Завантажую {progress_label} ордери Binance")
         progress_message_id = progress.message_id
 
@@ -295,12 +331,15 @@ class ReceiptBot:
                 )
             else:
                 orders = self.binance_client.get_active_orders()
+            if trade_type_filter_norm:
+                orders = [order for order in orders if order.trade_type.upper() == trade_type_filter_norm]
             if not orders:
-                empty_message = (
-                    "Тестові ордери не знайдено. Перевірте BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS"
-                    if test_mode
-                    else "Активних ордерів не знайдено"
-                )
+                if test_mode:
+                    empty_message = "Тестові ордери не знайдено. Перевірте BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS"
+                elif trade_type_filter_norm:
+                    empty_message = f"Активних ордерів типу {self._trade_type_label(trade_type_filter_norm)} не знайдено"
+                else:
+                    empty_message = "Активних ордерів не знайдено"
                 self._safe_edit_or_send(message.chat.id, progress_message_id, empty_message)
                 return
 
@@ -378,6 +417,25 @@ class ReceiptBot:
                 f"Помилка обробки активних ордерів: {exc}",
                 fallback_to_message_id=message.message_id,
             )
+
+    def _handle_active_orders_filter_callback(self, call: telebot.types.CallbackQuery) -> None:
+        data = (call.data or "").strip().lower()
+        selected = data.split(":", 1)[1] if ":" in data else ""
+        selected_to_trade_type = {
+            "buy": "BUY",
+            "sell": "SELL",
+            "all": None,
+        }
+        trade_type = selected_to_trade_type.get(selected)
+        if selected not in selected_to_trade_type:
+            self.bot.answer_callback_query(call.id, "Невідомий тип ордерів")
+            return
+        if not call.message:
+            self.bot.answer_callback_query(call.id, "Помилка контексту")
+            return
+
+        self.bot.answer_callback_query(call.id, "Запускаю перевірку")
+        self._handle_orders_scan(call.message, test_mode=False, trade_type_filter=trade_type)
 
     def _handle_manual_code_callback(self, call: telebot.types.CallbackQuery) -> None:
         data = call.data or ""
