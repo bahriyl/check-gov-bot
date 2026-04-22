@@ -93,6 +93,20 @@ class BinanceClientTests(unittest.TestCase):
         orders = self.client.get_orders_from_history_by_numbers(["1001", "1002"], rows=1)
         self.assertEqual([order.order_number for order in orders], ["1002"])
 
+    @patch("app.binance.requests.get")
+    def test_get_orders_from_history_continues_when_api_caps_page_size(self, mock_get) -> None:
+        first_page = [
+            {"orderNumber": f"9{i:03d}", "tradeType": "BUY", "amount": "1", "createTime": i}
+            for i in range(50)
+        ]
+        mock_get.side_effect = [
+            FakeResponse({"data": {"rows": first_page}}),
+            FakeResponse({"data": {"rows": [{"orderNumber": "1001", "tradeType": "SELL", "amount": "30", "createTime": 300}]}}),
+            FakeResponse({"data": {"rows": []}}),
+        ]
+        orders = self.client.get_orders_from_history_by_numbers(["1001"], rows=100)
+        self.assertEqual([order.order_number for order in orders], ["1001"])
+
 
 if __name__ == "__main__":
     unittest.main()

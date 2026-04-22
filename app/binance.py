@@ -103,9 +103,10 @@ class BinanceP2PClient:
     def get_active_orders(self, rows: int = 100) -> list[BinanceOrder]:
         endpoint = f"{self.base_url}/sapi/v1/c2c/orderMatch/listOrders"
         page = 1
+        max_pages = 1000
         all_orders: list[dict] = []
 
-        while True:
+        while page <= max_pages:
             query = self._sign_query({})
             body = {
                 "page": page,
@@ -131,9 +132,9 @@ class BinanceP2PClient:
             if not items:
                 break
             all_orders.extend(items)
-            if len(items) < rows:
-                break
             page += 1
+        else:  # pragma: no cover
+            raise BinanceAPIError("Exceeded max pages while loading Binance active orders")
 
         return self._map_orders(all_orders)
 
@@ -144,10 +145,11 @@ class BinanceP2PClient:
 
         endpoint = f"{self.base_url}/sapi/v1/c2c/orderMatch/listUserOrderHistory"
         page = 1
+        max_pages = 1000
         requested_set = set(requested)
         found: dict[str, BinanceOrder] = {}
 
-        while True:
+        while page <= max_pages:
             query = self._sign_query({"page": page, "rows": rows})
             resp = requests.get(
                 endpoint,
@@ -171,18 +173,21 @@ class BinanceP2PClient:
                 if order.order_number in requested_set and order.order_number not in found:
                     found[order.order_number] = order
 
-            if len(found) == len(requested_set) or len(items) < rows:
+            if len(found) == len(requested_set):
                 break
             page += 1
+        else:  # pragma: no cover
+            raise BinanceAPIError("Exceeded max pages while loading Binance order history")
 
         return [found[num] for num in requested if num in found]
 
     def get_chat_messages(self, order_number: str, rows: int = 100) -> list[BinanceChatMessage]:
         endpoint = f"{self.base_url}/sapi/v1/c2c/chat/retrieveChatMessagesWithPagination"
         page = 1
+        max_pages = 1000
         out: list[BinanceChatMessage] = []
 
-        while True:
+        while page <= max_pages:
             query = self._sign_query(
                 {
                     "orderNo": order_number,
@@ -226,9 +231,9 @@ class BinanceP2PClient:
                     )
                 )
 
-            if len(messages) < rows:
-                break
             page += 1
+        else:  # pragma: no cover
+            raise BinanceAPIError("Exceeded max pages while loading Binance chat messages")
 
         out.sort(key=lambda item: item.message_time)
         return out

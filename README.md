@@ -12,8 +12,7 @@ Telegram bot (Python + `pytelegrambotapi`) that validates bank receipts from pho
 - Detects bank/service and extracts receipt/document code
 - Checks:
   - `ПриватБанк` via direct request to `https://privatbank.ua/pb/ajax/find-document`
-  - other providers via `https://check.gov.ua/api/handler`
-- For `check.gov.ua` runs the request inside Playwright page context (captcha + fetch in the same browser session), because server-side raw HTTP calls can be rejected with `400 Bad request`
+  - other providers via full browser automation on `https://check.gov.ua/` (select provider, enter receipt code, click `Перевірити`, parse rendered result)
 
 ## Requirements
 

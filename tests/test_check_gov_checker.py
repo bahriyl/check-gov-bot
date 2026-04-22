@@ -60,6 +60,26 @@ class CheckGovCheckerTests(unittest.TestCase):
         self.assertIn("monobank", calls)
         self.assertEqual(result.details.get("payment", {}).get("amount"), "200")
 
+    def test_ui_paid_result_without_payments_is_valid(self) -> None:
+        checker = CheckGovChecker()
+
+        checker._check_in_browser = lambda *_args: (  # type: ignore[method-assign]
+            200,
+            {
+                "ui": {
+                    "check_result_text": "Квитанція Оплачена",
+                    "result_flag_text": "Оплачена",
+                    "hint_text": "",
+                }
+            },
+            "",
+        )
+        checker.close = lambda: None  # type: ignore[assignment]
+
+        result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
+        self.assertEqual(result.status, CheckStatus.VALID)
+        self.assertIn("Оплачена", result.message)
+
 
 if __name__ == "__main__":
     unittest.main()

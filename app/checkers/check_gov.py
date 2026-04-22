@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import re
 from threading import Lock
+from typing import Any
 
 from playwright.sync_api import sync_playwright
 
@@ -58,50 +59,103 @@ class CheckGovChecker:
             timeout=self.timeout_seconds * 1000,
         )
 
+    def _prepare_form(self, provider_code: str, receipt_code: str) -> None:
+        self._page.evaluate(
+            """
+            ({ providerCode, receiptCode }) => {
+              const company = document.getElementById('company');
+              const refs = document.getElementById('references');
+              if (!company || !refs) {
+                throw new Error('check.gov form fields are not available');
+              }
+
+              company.value = providerCode;
+              company.dispatchEvent(new Event('input', { bubbles: true }));
+              company.dispatchEvent(new Event('change', { bubbles: true }));
+
+              refs.focus();
+              refs.value = '';
+              refs.dispatchEvent(new Event('input', { bubbles: true }));
+              refs.value = receiptCode;
+              refs.dispatchEvent(new Event('input', { bubbles: true }));
+              refs.dispatchEvent(new Event('change', { bubbles: true }));
+              refs.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: '0' }));
+            }
+            """,
+            {"providerCode": provider_code, "receiptCode": receipt_code},
+        )
+        self._page.wait_for_timeout(150)
+
+    def _submit_form_and_capture(self) -> tuple[int, dict | None, str]:
+        response = None
+        with self._page.expect_response(
+            lambda r: "/api/handler" in r.url and r.request.method == "POST",
+            timeout=self.timeout_seconds * 1000,
+        ) as info:
+            # Custom layout overlays pointer targets; force-click avoids interception.
+            self._page.locator("#submit").click(force=True, timeout=self.timeout_seconds * 1000)
+        response = info.value
+
+        text = response.text() or ""
+        data: dict | None = None
+        try:
+            parsed = response.json()
+            if isinstance(parsed, dict):
+                data = parsed
+        except Exception:
+            data = None
+
+        return int(response.status), data, text
+
+    def _read_ui_result(self) -> dict[str, Any]:
+        return self._page.evaluate(
+            """
+            () => {
+              const read = (id) => {
+                const node = document.getElementById(id);
+                if (!node) return { text: '', visible: false };
+                const style = window.getComputedStyle(node);
+                const text = (node.textContent || '').replace(/\\s+/g, ' ').trim();
+                const visible = style.display !== 'none'
+                  && style.visibility !== 'hidden'
+                  && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+                return { text, visible };
+              };
+
+              const checkResult = read('checkResult');
+              const resultFlag = read('resultFlag');
+              const hint = read('hint');
+              const submitNode = document.getElementById('submit');
+              const submitClass = submitNode ? (submitNode.className || '') : '';
+              const fileNode = document.getElementById('resultFile');
+              const fileHref = fileNode ? (fileNode.getAttribute('href') || '') : '';
+              return {
+                check_result_text: checkResult.text,
+                check_result_visible: checkResult.visible,
+                result_flag_text: resultFlag.text,
+                result_flag_visible: resultFlag.visible,
+                hint_text: hint.text,
+                hint_visible: hint.visible,
+                submit_class: submitClass,
+                result_file_href: fileHref,
+              };
+            }
+            """
+        )
+
     def _check_in_browser(self, provider_code: str, receipt_code: str) -> tuple[int, dict | None, str]:
         self._ensure_session()
         self._page.wait_for_function(
             "() => !!(window.grecaptcha && window.grecaptcha.execute && window.conf)",
             timeout=self.timeout_seconds * 1000,
         )
-        result = self._page.evaluate(
-            """
-            async ({ providerCode, receiptCode }) => {
-              const key = (window.conf && window.conf.recaptchaKey) || '6Lft1MYUAAAAAJQ51w5cBYGmLmkcuJ_EjoDYG8Y4';
-              const token = await grecaptcha.execute(key, { action: 'homepage' });
+        self._prepare_form(provider_code, receipt_code)
+        status_code, data, raw_text = self._submit_form_and_capture()
+        ui = self._read_ui_result()
 
-              const payload = {
-                c: 'check',
-                company: providerCode,
-                check: receiptCode,
-                browser: (window.conf && window.conf.info)
-                  ? window.conf.info
-                  : { agent: navigator.userAgent, lang: (navigator.language || 'uk-UA') },
-                recaptcha: token,
-              };
-
-              const response = await fetch('/api/handler', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-              });
-
-              const text = await response.text();
-              let json = null;
-              try {
-                json = JSON.parse(text);
-              } catch (e) {}
-
-              return {
-                statusCode: response.status,
-                json,
-                text,
-              };
-            }
-            """,
-            {"providerCode": provider_code, "receiptCode": receipt_code},
-        )
-        return int(result["statusCode"]), result.get("json"), result.get("text", "")
+        out = dict(data) if isinstance(data, dict) else {}
+        out["ui"] = ui
+        return status_code, out, raw_text
 
     @staticmethod
     def _provider_candidates(provider_code: str) -> list[str]:
@@ -192,6 +246,25 @@ class CheckGovChecker:
                             "payment": payment,
                         },
                     )
+                if isinstance(data, dict):
+                    ui = data.get("ui") if isinstance(data.get("ui"), dict) else {}
+                    flag_text = str(ui.get("result_flag_text") or "").lower()
+                    result_text = str(ui.get("check_result_text") or "").lower()
+                    hint_text = str(ui.get("hint_text") or "").lower()
+                    if any(token in flag_text for token in ("оплачен", "успіш")):
+                        return CheckResult(
+                            status=CheckStatus.VALID,
+                            source="check.gov.ua",
+                            message=str(ui.get("check_result_text") or "Платіж знайдено"),
+                            details={**data, "http_status": status_code, "provider_code": current_provider},
+                        )
+                    if "не знайден" in flag_text or "не знайден" in result_text or "не знайден" in hint_text:
+                        return CheckResult(
+                            status=CheckStatus.NOT_FOUND,
+                            source="check.gov.ua",
+                            message=str(ui.get("check_result_text") or ui.get("hint_text") or "Запис не знайдено"),
+                            details={**data, "http_status": status_code, "provider_code": current_provider},
+                        )
 
                 if self._is_retryable_einfo(data):
                     self.close()
