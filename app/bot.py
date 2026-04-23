@@ -37,6 +37,7 @@ class ActiveOrdersState:
     source_message: telebot.types.Message
     test_mode: bool
     tasks: list[ActiveOrderTask]
+    progress_message_id: int | None = None
     next_index: int = 0
     lines_by_order: dict[str, list[str]] | None = None
     order_labels: dict[str, str] | None = None
@@ -476,7 +477,16 @@ class ReceiptBot:
                 reply_to_message_id=state.source_message.message_id,
             )
 
+    def _set_active_progress(self, state: ActiveOrdersState, text: str) -> None:
+        self._safe_edit_or_send(
+            state.source_message.chat.id,
+            state.progress_message_id,
+            text,
+            fallback_to_message_id=state.source_message.message_id,
+        )
+
     def _finalize_active_orders_state(self, state: ActiveOrdersState) -> None:
+        self._set_active_progress(state, "🧾 Формую підсумок перевірки")
         blocks: list[str] = []
         for order_key, label in (state.order_labels or {}).items():
             lines = (state.lines_by_order or {}).get(order_key) or []
@@ -506,6 +516,10 @@ class ReceiptBot:
             result: CheckResult | None = None
             temp_path: Path | None = None
             try:
+                self._set_active_progress(
+                    state,
+                    f"🔎 OCR зображення {task.image_idx}/{task.image_total} для ордера {task.order_key}",
+                )
                 temp_path = self._download_remote_image(task.image_url)
                 payload = extract_ocr_payload(temp_path)
                 parsed = parse_receipt_text(payload.text, self.providers, docai_document=payload.docai_document)
@@ -533,12 +547,20 @@ class ReceiptBot:
                 continue
 
             if not parsed.provider_code:
+                self._set_active_progress(
+                    state,
+                    f"⏸️ Очікую вибір банку для квитанції {task.image_idx}/{task.image_total} (ордер {task.order_key})",
+                )
                 state.waiting_task = task
                 state.waiting_parsed = parsed
                 self._send_active_unknown_provider_prompt(state, task, parsed)
                 return
 
             try:
+                self._set_active_progress(
+                    state,
+                    f"🌐 Перевіряю квитанцію {task.image_idx}/{task.image_total} для ордера {task.order_key}",
+                )
                 result = self._run_check_for_active_orders(parsed)
                 (state.lines_by_order or {}).setdefault(task.order_key, []).append(
                     f"{task.image_idx}. {self._format_active_orders_line(parsed, result, 'Помилка перевірки')}"
@@ -572,12 +594,24 @@ class ReceiptBot:
             test_mode,
             f"start scan chat_id={message.chat.id} trade_type_filter={trade_type_filter_norm or 'ALL'}",
         )
+        progress_label = "тестові неактивні" if test_mode else "активні"
+        if trade_type_filter_norm:
+            progress_label = f"{progress_label} ({self._trade_type_label(trade_type_filter_norm)})"
+        progress = self.bot.send_message(
+            message.chat.id,
+            f"🔄 Завантажую {progress_label} ордери Binance",
+            reply_to_message_id=message.message_id,
+        )
+        progress_message_id = progress.message_id
 
         try:
             if test_mode:
                 if not self.settings.binance_test_non_active_order_numbers:
-                    self.bot.send_message(
-                        message.chat.id, "Не вказано BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS для /test_active_orders"
+                    self._safe_edit_or_send(
+                        message.chat.id,
+                        progress_message_id,
+                        "Не вказано BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS для /test_active_orders",
+                        fallback_to_message_id=message.message_id,
                     )
                     self._debug_test_active_orders_log(test_mode, "missing BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS, abort")
                     return
@@ -603,7 +637,12 @@ class ReceiptBot:
                     empty_message = f"Активних ордерів типу {self._trade_type_label(trade_type_filter_norm)} не знайдено"
                 else:
                     empty_message = "Активних ордерів не знайдено"
-                self.bot.send_message(message.chat.id, empty_message, reply_to_message_id=message.message_id)
+                self._safe_edit_or_send(
+                    message.chat.id,
+                    progress_message_id,
+                    empty_message,
+                    fallback_to_message_id=message.message_id,
+                )
                 self._debug_test_active_orders_log(test_mode, "no orders after filtering, abort")
                 return
 
@@ -611,6 +650,12 @@ class ReceiptBot:
             order_labels: dict[str, str] = {}
             lines_by_order: dict[str, list[str]] = {}
             for idx, order in enumerate(orders, start=1):
+                self._safe_edit_or_send(
+                    message.chat.id,
+                    progress_message_id,
+                    f"📥 Збираю дані для ордера {idx}/{len(orders)}: {order.order_number}",
+                    fallback_to_message_id=message.message_id,
+                )
                 self._debug_test_active_orders_log(
                     test_mode,
                     f"order {idx}/{len(orders)} number={order.order_number} trade_type={order.trade_type} total={order.total_amount}",
@@ -657,6 +702,7 @@ class ReceiptBot:
                 source_message=message,
                 test_mode=test_mode,
                 tasks=tasks,
+                progress_message_id=progress_message_id,
                 lines_by_order=lines_by_order,
                 order_labels=order_labels,
             )
@@ -664,11 +710,19 @@ class ReceiptBot:
             self._active_orders_context[key] = state
             self._continue_active_orders_scan(key)
         except BinanceAPIError as exc:
-            self.bot.send_message(message.chat.id, f"Помилка Binance API: {exc}", reply_to_message_id=message.message_id)
+            self._safe_edit_or_send(
+                message.chat.id,
+                progress_message_id,
+                f"Помилка Binance API: {exc}",
+                fallback_to_message_id=message.message_id,
+            )
             self._debug_test_active_orders_log(test_mode, f"Binance API error={exc}")
         except Exception as exc:
-            self.bot.send_message(
-                message.chat.id, f"Помилка обробки активних ордерів: {exc}", reply_to_message_id=message.message_id
+            self._safe_edit_or_send(
+                message.chat.id,
+                progress_message_id,
+                f"Помилка обробки активних ордерів: {exc}",
+                fallback_to_message_id=message.message_id,
             )
             self._debug_test_active_orders_log(test_mode, f"processing error={exc}")
         finally:
@@ -749,10 +803,16 @@ class ReceiptBot:
                 confidence=1.0,
                 raw_text=pending.parsed.raw_text,
             )
+            progress = self.bot.send_message(chat_id, "🌐 Перевіряю квитанцію")
             result = self._run_check(parsed)
             self._manual_context.pop(key, None)
             self.bot.answer_callback_query(call.id, "Перевіряю квитанцію")
-            self.bot.send_message(chat_id, self._format_reply(parsed, result), reply_markup=self._build_manual_button(parsed))
+            self._safe_edit_or_send(
+                chat_id,
+                progress.message_id,
+                self._format_reply(parsed, result),
+                reply_markup=self._build_manual_button(parsed),
+            )
             return
 
         parsed = ParsedReceipt(
@@ -892,6 +952,11 @@ class ReceiptBot:
                 confidence=1.0,
                 raw_text=pending.parsed.raw_text,
             )
+            self.bot.send_message(
+                chat_id,
+                "🌐 Перевіряю квитанцію",
+                reply_to_message_id=getattr(message, "message_id", None),
+            )
             result = self._run_check(parsed)
             self.bot.reply_to(message, self._format_reply(parsed, result), reply_markup=self._build_manual_button(parsed))
             self._manual_context.pop(key, None)
@@ -914,6 +979,11 @@ class ReceiptBot:
             receipt_code=manual_code,
             confidence=1.0,
             raw_text=pending.parsed.raw_text,
+        )
+        self.bot.send_message(
+            chat_id,
+            "🌐 Перевіряю квитанцію",
+            reply_to_message_id=getattr(message, "message_id", None),
         )
         result = self._run_check(parsed)
         self.bot.reply_to(message, self._format_reply(parsed, result), reply_markup=self._build_manual_button(parsed))

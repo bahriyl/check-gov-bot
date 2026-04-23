@@ -218,7 +218,8 @@ class BotManualEntryFlowTests(unittest.TestCase):
 
         self.assertTrue(handled)
         self.assertEqual(fake_telebot.answered_callbacks, [("cb-3", "Введіть код квитанції")])
-        self.assertEqual(fake_telebot.sent_messages[-1]["text"], "Введіть код квитанції вручну одним повідомленням")
+        self.assertEqual(fake_telebot.sent_messages[0]["text"], "Введіть код квитанції вручну одним повідомленням")
+        self.assertEqual(fake_telebot.sent_messages[-1]["text"], "🌐 Перевіряю квитанцію")
         self.assertEqual(captured[0].provider_code, "privatbank")
         self.assertEqual(captured[0].receipt_code, "1234-5678-9012-3456")
 
