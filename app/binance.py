@@ -181,11 +181,12 @@ class BinanceP2PClient:
 
         return [found[num] for num in requested if num in found]
 
-    def get_chat_messages(self, order_number: str, rows: int = 100) -> list[BinanceChatMessage]:
+    def get_chat_messages(self, order_number: str, rows: int = 100, max_pages: int = 100) -> list[BinanceChatMessage]:
         endpoint = f"{self.base_url}/sapi/v1/c2c/chat/retrieveChatMessagesWithPagination"
         page = 1
-        max_pages = 1000
         out: list[BinanceChatMessage] = []
+        seen_signatures: set[tuple[str, int, str, str]] = set()
+        consecutive_pages_without_new = 0
 
         while page <= max_pages:
             query = self._sign_query(
@@ -213,6 +214,7 @@ class BinanceP2PClient:
             if not messages:
                 break
 
+            page_added = 0
             for msg in messages:
                 msg_type = str(msg.get("type", "")).lower()
                 if msg_type not in {"image", "text", "system", "auto_reply"}:
@@ -220,16 +222,29 @@ class BinanceP2PClient:
                 message_order_no = str(msg.get("orderNo") or order_number)
                 image_url = str(msg.get("imageUrl") or "").strip()
                 content = str(msg.get("content") or msg.get("autoReplyMsg") or "").strip()
+                message_time = int(msg.get("createTime") or 0)
+                signature = (msg_type, message_time, image_url, content)
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
                 out.append(
                     BinanceChatMessage(
                         order_number=message_order_no,
                         message_type=msg_type,
                         content=content,
                         image_url=image_url,
-                        message_time=int(msg.get("createTime") or 0),
+                        message_time=message_time,
                         raw=msg,
                     )
                 )
+                page_added += 1
+
+            if page_added == 0:
+                consecutive_pages_without_new += 1
+                if consecutive_pages_without_new >= 3:
+                    break
+            else:
+                consecutive_pages_without_new = 0
 
             page += 1
         else:  # pragma: no cover

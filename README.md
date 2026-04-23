@@ -55,6 +55,7 @@ Use `/test_active_orders` to run scan only for non-active order numbers from `BI
 Menu buttons in chat:
 - `Перевірити квитанцію`
 - `Перевірити активні ордери` (opens the same side selection: `Купівля`, `Продаж`, `Усі`)
+- `Ввести код квитанції` (select provider and enter receipt code manually)
 
 ## Amount And Card Source
 

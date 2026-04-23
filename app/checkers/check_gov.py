@@ -59,41 +59,167 @@ class CheckGovChecker:
             timeout=self.timeout_seconds * 1000,
         )
 
-    def _prepare_form(self, provider_code: str, receipt_code: str) -> None:
-        self._page.evaluate(
+    def _human_pause(self, ms: int) -> None:
+        self._page.wait_for_timeout(ms)
+
+    def _human_click(self, locator, *, force: bool = False) -> None:
+        locator.wait_for(state="visible", timeout=self.timeout_seconds * 1000)
+        try:
+            locator.scroll_into_view_if_needed(timeout=self.timeout_seconds * 1000)
+        except Exception:
+            pass
+        box = locator.bounding_box()
+        if not box:
+            locator.click(force=force, timeout=self.timeout_seconds * 1000)
+            return
+        target_x = box["x"] + box["width"] * 0.5
+        target_y = box["y"] + box["height"] * 0.5
+        approach_x = max(1, target_x - min(40, box["width"] * 0.4))
+        approach_y = max(1, target_y - min(14, box["height"] * 0.3))
+        self._page.mouse.move(approach_x, approach_y, steps=5)
+        self._human_pause(25)
+        self._page.mouse.move(target_x, target_y, steps=8)
+        self._human_pause(35)
+        self._page.mouse.down()
+        self._human_pause(28)
+        self._page.mouse.up()
+        self._human_pause(45)
+
+    def _resolve_provider_target(self, provider_code: str) -> dict[str, Any]:
+        return self._page.evaluate(
             """
-            ({ providerCode, receiptCode }) => {
+            ({ providerCode }) => {
+              const normalize = (value) => String(value || '').trim().toLowerCase();
+              const provider = normalize(providerCode);
               const company = document.getElementById('company');
-              const refs = document.getElementById('references');
-              if (!company || !refs) {
-                throw new Error('check.gov form fields are not available');
+              const companyBlock = document.getElementById('companyBlock');
+              const parseAliases = (raw) => {
+                try {
+                  const parsed = JSON.parse(raw || '[]');
+                  return Array.isArray(parsed) ? parsed.map((x) => normalize(x)) : [];
+                } catch (_err) {
+                  return [];
+                }
+              };
+
+              let selectedValue = providerCode;
+              let selectedText = '';
+              let selectedAliases = [];
+              if (company) {
+                const options = Array.from(company.options || []);
+                const direct = options.find((opt) => normalize(opt.value) === provider);
+                const byAlias = options.find((opt) => parseAliases(opt.getAttribute('alt')).includes(provider));
+                const byText = options.find((opt) => normalize(opt.textContent).includes(provider));
+                const matched = direct || byAlias || byText;
+                if (matched) {
+                  selectedValue = matched.value;
+                  selectedText = (matched.textContent || '').trim();
+                  selectedAliases = parseAliases(matched.getAttribute('alt'));
+                }
               }
 
-              company.value = providerCode;
-              company.dispatchEvent(new Event('input', { bubbles: true }));
-              company.dispatchEvent(new Event('change', { bubbles: true }));
+              let targetIndex = -1;
+              const list = companyBlock ? companyBlock.querySelector('.selection-list') : null;
+              if (list) {
+                const items = Array.from(list.querySelectorAll('div'));
+                const byExactText = items.findIndex((item) => normalize(item.textContent) === normalize(selectedText));
+                const byProviderAlias = items.findIndex((item) => parseAliases(item.getAttribute('alt')).includes(provider));
+                const bySelectedAlias = items.findIndex((item) =>
+                  parseAliases(item.getAttribute('alt')).some((alias) => selectedAliases.includes(alias))
+                );
+                const byProviderText = items.findIndex((item) => normalize(item.textContent).includes(provider));
+                targetIndex = [byExactText, byProviderAlias, bySelectedAlias, byProviderText].find((idx) => idx >= 0) ?? -1;
+              }
 
-              refs.focus();
-              refs.value = '';
-              refs.dispatchEvent(new Event('input', { bubbles: true }));
-              refs.value = receiptCode;
-              refs.dispatchEvent(new Event('input', { bubbles: true }));
+              return { selectedValue, targetIndex };
+            }
+            """,
+            {"providerCode": provider_code},
+        )
+
+    def _prepare_form(self, provider_code: str, receipt_code: str) -> None:
+        target = self._resolve_provider_target(provider_code)
+        selected_value = str(target.get("selectedValue") or provider_code or "")
+        raw_target_index = target.get("targetIndex")
+        target_index = int(raw_target_index) if raw_target_index is not None else -1
+
+        self._page.evaluate(
+            """
+            ({ selectedValue }) => {
+              const company = document.getElementById('company');
+              if (company) {
+                company.value = selectedValue;
+                company.dispatchEvent(new Event('input', { bubbles: true }));
+                company.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            }
+            """,
+            {"selectedValue": selected_value},
+        )
+
+        opener = self._page.locator("xpath=//*[@id='companyBlock']/div/div[1]")
+        self._human_click(opener)
+        self._human_pause(65)
+
+        if target_index >= 0:
+            provider_item = self._page.locator("#companyBlock .selection-list > div").nth(target_index)
+            self._human_click(provider_item)
+        self._human_pause(80)
+
+        refs = self._page.locator("#references")
+        self._human_click(refs)
+        refs.press("ControlOrMeta+A")
+        self._human_pause(20)
+        refs.press("Backspace")
+        self._human_pause(28)
+        refs.type(receipt_code, delay=52)
+        self._human_pause(42)
+
+        self._page.evaluate(
+            """
+            () => {
+              const refs = document.getElementById('references');
+              if (!refs) {
+                throw new Error('check.gov form fields are not available');
+              }
               refs.dispatchEvent(new Event('change', { bubbles: true }));
               refs.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: '0' }));
             }
             """,
-            {"providerCode": provider_code, "receiptCode": receipt_code},
         )
-        self._page.wait_for_timeout(150)
+        self._human_pause(75)
 
     def _submit_form_and_capture(self) -> tuple[int, dict | None, str]:
         response = None
+        submit_xpath = "//div[@id='submit']"
+        submit = self._page.locator(f"xpath={submit_xpath}")
+        submit.wait_for(state="visible", timeout=self.timeout_seconds * 1000)
+        self._page.wait_for_function(
+            """
+            () => {
+              const node = document.getElementById('submit');
+              if (!node) return false;
+              const style = window.getComputedStyle(node);
+              const className = String(node.className || '').toLowerCase();
+              const visible = style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+              const clickableByStyle = style.pointerEvents !== 'none';
+              const notDisabledClass = !className.includes('disabled');
+              return visible && clickableByStyle && notDisabledClass;
+            }
+            """,
+            timeout=self.timeout_seconds * 1000,
+        )
         with self._page.expect_response(
             lambda r: "/api/handler" in r.url and r.request.method == "POST",
             timeout=self.timeout_seconds * 1000,
         ) as info:
-            # Custom layout overlays pointer targets; force-click avoids interception.
-            self._page.locator("#submit").click(force=True, timeout=self.timeout_seconds * 1000)
+            # Custom layout overlays pointer targets; fall back to force click if needed.
+            try:
+                self._human_click(submit)
+            except Exception:
+                submit.click(force=True, timeout=self.timeout_seconds * 1000)
         response = info.value
 
         text = response.text() or ""
@@ -149,6 +275,17 @@ class CheckGovChecker:
             "() => !!(window.grecaptcha && window.grecaptcha.execute && window.conf)",
             timeout=self.timeout_seconds * 1000,
         )
+        self._page.wait_for_function(
+            """
+            () => {
+              const select = document.getElementById('company');
+              const optionsReady = !!(select && select.options && select.options.length > 1);
+              const listReady = document.querySelectorAll('#companyBlock .selection-list div').length > 0;
+              return optionsReady || listReady;
+            }
+            """,
+            timeout=self.timeout_seconds * 1000,
+        )
         self._prepare_form(provider_code, receipt_code)
         status_code, data, raw_text = self._submit_form_and_capture()
         ui = self._read_ui_result()
@@ -156,6 +293,25 @@ class CheckGovChecker:
         out = dict(data) if isinstance(data, dict) else {}
         out["ui"] = ui
         return status_code, out, raw_text
+
+    def _reload_page(self) -> None:
+        self._ensure_session()
+        self._page.goto(self.CHECK_PAGE, wait_until="domcontentloaded", timeout=self.timeout_seconds * 1000)
+        self._page.wait_for_function(
+            "() => !!(window.grecaptcha && window.grecaptcha.execute && window.conf)",
+            timeout=self.timeout_seconds * 1000,
+        )
+        self._page.wait_for_function(
+            """
+            () => {
+              const select = document.getElementById('company');
+              const optionsReady = !!(select && select.options && select.options.length > 1);
+              const listReady = document.querySelectorAll('#companyBlock .selection-list div').length > 0;
+              return optionsReady || listReady;
+            }
+            """,
+            timeout=self.timeout_seconds * 1000,
+        )
 
     @staticmethod
     def _provider_candidates(provider_code: str) -> list[str]:
@@ -194,7 +350,7 @@ class CheckGovChecker:
         text = str(data.get("textUk") or "").lower()
         return "unsupported company" in info or "підприємств" in text
 
-    def check(self, provider_code: str, receipt_code: str) -> CheckResult:
+    def check(self, provider_code: str, receipt_code: str, reload_before_check: bool = False) -> CheckResult:
         last_result: tuple[int, dict | None, str] | None = None
         tries = 0
         provider_candidates = self._provider_candidates(provider_code) or [provider_code]
@@ -220,6 +376,8 @@ class CheckGovChecker:
                 tries += 1
                 try:
                     with self._lock:
+                        if reload_before_check:
+                            self._reload_page()
                         status_code, data, raw_text = self._check_in_browser(current_provider, receipt_code)
                 except Exception as exc:
                     # Force session reset on unexpected browser errors and retry once.

@@ -80,6 +80,38 @@ class CheckGovCheckerTests(unittest.TestCase):
         self.assertEqual(result.status, CheckStatus.VALID)
         self.assertIn("Оплачена", result.message)
 
+    def test_reload_before_check_calls_reload_per_attempt(self) -> None:
+        checker = CheckGovChecker()
+        reload_calls: list[int] = []
+
+        checker._reload_page = lambda: reload_calls.append(1)  # type: ignore[assignment]
+        checker._check_in_browser = lambda *_args: (  # type: ignore[method-assign]
+            200,
+            {"payments": [{"id": 1, "recipient": "User, 444111******1722", "amount": 200}]},
+            "",
+        )
+        checker.close = lambda: None  # type: ignore[assignment]
+
+        result = checker.check("monobank", "KPT2-0T15-39BM-HX28", reload_before_check=True)
+        self.assertEqual(result.status, CheckStatus.VALID)
+        self.assertEqual(len(reload_calls), 1)
+
+    def test_reload_before_check_default_false(self) -> None:
+        checker = CheckGovChecker()
+        reload_calls: list[int] = []
+
+        checker._reload_page = lambda: reload_calls.append(1)  # type: ignore[assignment]
+        checker._check_in_browser = lambda *_args: (  # type: ignore[method-assign]
+            200,
+            {"payments": [{"id": 1, "recipient": "User, 444111******1722", "amount": 200}]},
+            "",
+        )
+        checker.close = lambda: None  # type: ignore[assignment]
+
+        result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
+        self.assertEqual(result.status, CheckStatus.VALID)
+        self.assertEqual(reload_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

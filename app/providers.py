@@ -117,11 +117,49 @@ class ProviderRegistry:
                 options = page.evaluate(
                     """
                     () => {
+                      const normalize = (value) => String(value || '').trim();
+                      const parseAliases = (raw) => {
+                        try {
+                          const parsed = JSON.parse(raw || '[]');
+                          return Array.isArray(parsed) ? parsed.map((x) => normalize(x).toLowerCase()) : [];
+                        } catch (_err) {
+                          return [];
+                        }
+                      };
+
+                      const out = [];
+                      const seen = new Set();
+                      const add = (code, name) => {
+                        const c = normalize(code).toLowerCase();
+                        const n = normalize(name);
+                        if (!c || c === '0' || seen.has(c)) return;
+                        seen.add(c);
+                        out.push([c, n || code]);
+                      };
+
                       const select = document.querySelector('#company');
-                      if (!select) return [];
-                      return Array.from(select.options)
-                        .filter(o => o.value && o.value !== '0')
-                        .map(o => [o.value, (o.textContent || '').trim()]);
+                      if (select) {
+                        for (const option of Array.from(select.options || [])) {
+                          const code = normalize(option.value);
+                          const name = normalize(option.textContent || '');
+                          if (!code || code === '0') continue;
+                          add(code, name);
+                        }
+                      }
+
+                      // New custom selector UI stores aliases in .selection-list div[alt].
+                      // Use aliases to recover provider codes when available.
+                      const listItems = Array.from(document.querySelectorAll('#companyBlock .selection-list div'));
+                      for (const item of listItems) {
+                        const name = normalize(item.textContent || '');
+                        const aliases = parseAliases(item.getAttribute('alt'));
+                        const aliasCode = aliases.find((a) => /^[a-z0-9_-]{2,}$/.test(a));
+                        if (aliasCode) {
+                          add(aliasCode, name);
+                        }
+                      }
+
+                      return out;
                     }
                     """
                 )

@@ -16,10 +16,10 @@ class _PrivatStub:
 
 class _CheckGovStub:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, bool]] = []
 
-    def check(self, provider_code: str, receipt_code: str) -> CheckResult:
-        self.calls.append((provider_code, receipt_code))
+    def check(self, provider_code: str, receipt_code: str, reload_before_check: bool = False) -> CheckResult:
+        self.calls.append((provider_code, receipt_code, reload_before_check))
         return CheckResult(
             status=CheckStatus.VALID,
             source="check.gov.ua",
@@ -44,7 +44,24 @@ class BotRunCheckTests(unittest.TestCase):
         result = ReceiptBot._run_check(bot_like, parsed)
 
         self.assertEqual(result.status, CheckStatus.VALID)
-        self.assertEqual(check_gov.calls, [("", "9B1K-AKB5-C1MP-26B6")])
+        self.assertEqual(check_gov.calls, [("", "9B1K-AKB5-C1MP-26B6", False)])
+
+    def test_active_orders_check_uses_reload_before_check(self) -> None:
+        check_gov = _CheckGovStub()
+        bot_like = SimpleNamespace(check_gov_checker=check_gov, privat_checker=_PrivatStub())
+        parsed = ParsedReceipt(
+            bank_label="Монобанк",
+            bank_key="monobank",
+            provider_code="monobank",
+            receipt_code="9B1K-AKB5-C1MP-26B6",
+            confidence=1.0,
+            raw_text="",
+        )
+
+        result = ReceiptBot._run_check_for_active_orders(bot_like, parsed)
+
+        self.assertEqual(result.status, CheckStatus.VALID)
+        self.assertEqual(check_gov.calls, [("monobank", "9B1K-AKB5-C1MP-26B6", True)])
 
 
 if __name__ == "__main__":
