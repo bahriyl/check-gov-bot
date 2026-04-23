@@ -95,7 +95,6 @@ class BotManualEntryFlowTests(unittest.TestCase):
                 "manual_provider:privatbank",
                 "manual_provider:pumb",
                 "manual_provider:sensbank",
-                "manual_provider:forwardbank",
                 "manual_cancel",
             ],
         )

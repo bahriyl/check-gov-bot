@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import re
 from threading import Lock
 from typing import Any
 
@@ -314,27 +313,6 @@ class CheckGovChecker:
         )
 
     @staticmethod
-    def _provider_candidates(provider_code: str) -> list[str]:
-        code = (provider_code or "").strip().lower()
-        if not code:
-            return []
-        variants = [code]
-        if "-" in code:
-            variants.append(code.replace("-", ""))
-            variants.append(code.replace("-", "_"))
-        if "_" in code:
-            variants.append(code.replace("_", ""))
-            variants.append(code.replace("_", "-"))
-        if re.fullmatch(r"[a-z]+", code):
-            variants.append(code[:1] + "-" + code[1:] if len(code) > 1 else code)
-        # Preserve order, remove duplicates.
-        out: list[str] = []
-        for item in variants:
-            if item and item not in out:
-                out.append(item)
-        return out
-
-    @staticmethod
     def _is_retryable_einfo(data: dict | None) -> bool:
         if not isinstance(data, dict):
             return False
@@ -342,101 +320,92 @@ class CheckGovChecker:
         text = str(data.get("textUk") or "").lower()
         return "internal" in info or "error" in info or "помил" in text
 
-    @staticmethod
-    def _is_unsupported_company(data: dict | None) -> bool:
-        if not isinstance(data, dict):
-            return False
-        info = str(data.get("eInfo") or "").lower()
-        text = str(data.get("textUk") or "").lower()
-        return "unsupported company" in info or "підприємств" in text
-
     def check(self, provider_code: str, receipt_code: str, reload_before_check: bool = False) -> CheckResult:
         last_result: tuple[int, dict | None, str] | None = None
-        tries = 0
-        provider_candidates = self._provider_candidates(provider_code) or [provider_code]
-        # check.gov.ua can reject a parsed provider with "unsupported company".
-        # In that case probe a small set of known provider codes before failing.
-        provider_candidates.extend(
-            [
-                "monobank",
-                "abank",
-                "pumb",
-                "easypay",
-                "portmone",
-                "uapay",
-                "ibox",
-                "govpay24",
-                "opendatabot",
-            ]
-        )
-        provider_candidates = [p for i, p in enumerate(provider_candidates) if p and p not in provider_candidates[:i]]
+        max_total_attempts = 2
+        attempts = 0
+        current_provider = (provider_code or "").strip().lower()
+        if not current_provider:
+            return CheckResult(
+                status=CheckStatus.UNPARSEABLE,
+                source="check.gov.ua",
+                message="Не вказано банк/сервіс для перевірки",
+            )
 
-        for current_provider in provider_candidates:
-            for _ in range(2):
-                tries += 1
-                try:
-                    with self._lock:
-                        if reload_before_check:
-                            self._reload_page()
-                        status_code, data, raw_text = self._check_in_browser(current_provider, receipt_code)
-                except Exception as exc:
-                    # Force session reset on unexpected browser errors and retry once.
-                    self.close()
-                    if tries < max(2, len(provider_candidates) * 2):
-                        continue
-                    return CheckResult(
-                        status=CheckStatus.CHECK_ERROR,
-                        source="check.gov.ua",
-                        message=f"Check.gov request failed: {exc}",
-                    )
+        for _ in range(max_total_attempts):
+            if attempts >= max_total_attempts:
+                break
+            attempts += 1
+            try:
+                with self._lock:
+                    if reload_before_check:
+                        self._reload_page()
+                    status_code, data, raw_text = self._check_in_browser(current_provider, receipt_code)
+            except Exception as exc:
+                # Force session reset on unexpected browser errors and retry once.
+                self.close()
+                if attempts < max_total_attempts:
+                    continue
+                return CheckResult(
+                    status=CheckStatus.CHECK_ERROR,
+                    source="check.gov.ua",
+                    message=f"Помилка перевірки check.gov.ua: зациклений/нестабільний запит ({exc})",
+                )
 
-                last_result = (status_code, data, raw_text)
-                if isinstance(data, dict) and data.get("payments"):
-                    payment = parse_check_gov_payment(data)
+            last_result = (status_code, data, raw_text)
+            if isinstance(data, dict) and data.get("payments"):
+                payment = parse_check_gov_payment(data)
+                return CheckResult(
+                    status=CheckStatus.VALID,
+                    source="check.gov.ua",
+                    message="Платіж знайдено",
+                    details={
+                        **data,
+                        "http_status": status_code,
+                        "provider_code": current_provider,
+                        "payment": payment,
+                    },
+                )
+            if isinstance(data, dict):
+                ui = data.get("ui") if isinstance(data.get("ui"), dict) else {}
+                flag_text = str(ui.get("result_flag_text") or "").lower()
+                result_text = str(ui.get("check_result_text") or "").lower()
+                hint_text = str(ui.get("hint_text") or "").lower()
+                if any(token in flag_text for token in ("оплачен", "успіш")):
                     return CheckResult(
                         status=CheckStatus.VALID,
                         source="check.gov.ua",
-                        message="Платіж знайдено",
+                        message=str(ui.get("check_result_text") or "Платіж знайдено"),
+                        details={**data, "http_status": status_code, "provider_code": current_provider},
+                    )
+                if "не знайден" in flag_text or "не знайден" in result_text or "не знайден" in hint_text:
+                    return CheckResult(
+                        status=CheckStatus.NOT_FOUND,
+                        source="check.gov.ua",
+                        message=str(ui.get("check_result_text") or ui.get("hint_text") or "Запис не знайдено"),
+                        details={**data, "http_status": status_code, "provider_code": current_provider},
+                    )
+
+            if self._is_retryable_einfo(data):
+                self.close()
+                if attempts >= max_total_attempts:
+                    return CheckResult(
+                        status=CheckStatus.CHECK_ERROR,
+                        source="check.gov.ua",
+                        message="Помилка перевірки check.gov.ua: нестабільна або застаріла відповідь сервісу",
                         details={
-                            **data,
                             "http_status": status_code,
                             "provider_code": current_provider,
-                            "payment": payment,
+                            "payload": data if isinstance(data, dict) else {"raw_text": raw_text[:1000]},
                         },
                     )
-                if isinstance(data, dict):
-                    ui = data.get("ui") if isinstance(data.get("ui"), dict) else {}
-                    flag_text = str(ui.get("result_flag_text") or "").lower()
-                    result_text = str(ui.get("check_result_text") or "").lower()
-                    hint_text = str(ui.get("hint_text") or "").lower()
-                    if any(token in flag_text for token in ("оплачен", "успіш")):
-                        return CheckResult(
-                            status=CheckStatus.VALID,
-                            source="check.gov.ua",
-                            message=str(ui.get("check_result_text") or "Платіж знайдено"),
-                            details={**data, "http_status": status_code, "provider_code": current_provider},
-                        )
-                    if "не знайден" in flag_text or "не знайден" in result_text or "не знайден" in hint_text:
-                        return CheckResult(
-                            status=CheckStatus.NOT_FOUND,
-                            source="check.gov.ua",
-                            message=str(ui.get("check_result_text") or ui.get("hint_text") or "Запис не знайдено"),
-                            details={**data, "http_status": status_code, "provider_code": current_provider},
-                        )
-
-                if self._is_retryable_einfo(data):
-                    self.close()
-                    continue
-                if self._is_unsupported_company(data):
-                    # Try next provider candidate.
-                    break
-                break
+                continue
 
         if not last_result:
             return CheckResult(
                 status=CheckStatus.CHECK_ERROR,
                 source="check.gov.ua",
-                message="Check.gov request failed: no response",
+                message="Помилка перевірки check.gov.ua: немає відповіді від сервісу",
             )
 
         status_code, data, raw_text = last_result
@@ -459,9 +428,9 @@ class CheckGovChecker:
             )
 
         return CheckResult(
-            status=CheckStatus.NOT_FOUND,
+            status=CheckStatus.CHECK_ERROR,
             source="check.gov.ua",
-            message="Запис не знайдено",
+            message="Помилка перевірки check.gov.ua: невизначена або застаріла відповідь",
             details=(data if isinstance(data, dict) else {"raw": data, "raw_text": raw_text[:1000]})
             | {"http_status": status_code},
         )

@@ -63,6 +63,7 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
         bot = ReceiptBot.__new__(ReceiptBot)
         fake_telebot = _FakeTeleBot()
         bot.bot = fake_telebot
+        bot._active_orders_context = {}
         return bot, fake_telebot
 
     def test_prompt_active_orders_selection_sends_inline_buttons(self) -> None:
@@ -130,18 +131,13 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
                 SimpleNamespace(order_number="S1", trade_type="SELL", total_amount="20"),
             ]
         )
-        status_updates: list[str] = []
-        bot._safe_edit_or_send = (
-            lambda _chat_id, _progress_message_id, text, **_kwargs: status_updates.append(text)
-        )
         bot._close_check_gov_session = lambda: None
-        message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99)
+        message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99, from_user=SimpleNamespace(id=9))
 
         bot._handle_orders_scan(message, test_mode=False, trade_type_filter="BUY")
 
         self.assertEqual(bot.binance_client.chat_calls, ["B1"])
-        self.assertIn("⚠️ Немає повідомлень чату ордера", "\n".join(fake_telebot.sent_messages[-1]["text"].splitlines()))
-        self.assertEqual(fake_telebot.sent_messages[0]["text"], "🔄 Завантажую активні (Купівля) ордери Binance")
+        self.assertIn("⚠️ Немає повідомлень чату ордера", fake_telebot.sent_messages[-1]["text"])
 
     def test_handle_orders_scan_filters_sell_orders(self) -> None:
         bot, _fake_telebot = self._build_bot()
@@ -155,7 +151,7 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
         )
         bot._safe_edit_or_send = lambda *_args, **_kwargs: None
         bot._close_check_gov_session = lambda: None
-        message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99)
+        message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99, from_user=SimpleNamespace(id=9))
 
         bot._handle_orders_scan(message, test_mode=False, trade_type_filter="SELL")
 
@@ -172,8 +168,6 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
         ]
         bot._download_remote_image = lambda _url: SimpleNamespace(exists=lambda: False)
         bot._close_check_gov_session = lambda: None
-        progress_updates: list[str] = []
-        bot._safe_edit_or_send = lambda _chat_id, _progress_message_id, text, **_kwargs: progress_updates.append(text)
         summary_holder: dict[str, str] = {}
         bot._send_long_text = lambda _chat_id, text, **_kwargs: summary_holder.update({"text": text})
         bot._run_check_for_active_orders = lambda _parsed: CheckResult(
@@ -195,16 +189,52 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
             patch("app.bot.extract_ocr_payload", side_effect=[SimpleNamespace(text="ok", docai_document=None), OCRError("bad ocr")]),
             patch("app.bot.parse_receipt_text", return_value=parsed_ok),
         ):
-            message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99)
+            message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99, from_user=SimpleNamespace(id=9))
             bot._handle_orders_scan(message, test_mode=False, trade_type_filter=None)
 
-        self.assertTrue(any(text.startswith("📥 Збираю дані для ордера") for text in progress_updates))
-        self.assertTrue(any(text.startswith("🔎 OCR зображення 1/2") for text in progress_updates))
-        self.assertTrue(any(text.startswith("🌐 Перевіряю квитанцію 1/2") for text in progress_updates))
-        self.assertTrue(any(text == "🧾 Формую підсумок перевірки" for text in progress_updates))
         summary = summary_holder.get("text", "")
         self.assertIn("✅ 100 - 4444********1111 | Монобанк | 9B1K-AKB5-C1MP-26B6 | VALID", summary)
         self.assertIn("⚠️ Помилка OCR: bad ocr", summary)
+
+    def test_format_reply_includes_result_message(self) -> None:
+        bot, _fake_telebot = self._build_bot()
+        parsed = ParsedReceipt(
+            bank_label="Монобанк",
+            bank_key="monobank",
+            provider_code="monobank",
+            receipt_code="9B1K-AKB5-C1MP-26B6",
+            confidence=1.0,
+            raw_text="",
+        )
+        result = CheckResult(
+            status=CheckStatus.CHECK_ERROR,
+            source="check.gov.ua",
+            message="Помилка перевірки check.gov.ua: невизначена або застаріла відповідь",
+        )
+
+        text = bot._format_reply(parsed, result)
+
+        self.assertIn("Деталі: Помилка перевірки check.gov.ua: невизначена або застаріла відповідь", text)
+
+    def test_active_orders_line_appends_reason_for_non_valid_status(self) -> None:
+        bot, _fake_telebot = self._build_bot()
+        parsed = ParsedReceipt(
+            bank_label="Монобанк",
+            bank_key="monobank",
+            provider_code="monobank",
+            receipt_code="9B1K-AKB5-C1MP-26B6",
+            confidence=1.0,
+            raw_text="",
+        )
+        result = CheckResult(
+            status=CheckStatus.CHECK_ERROR,
+            source="check.gov.ua",
+            message="Нестабільна відповідь сервісу",
+        )
+
+        line = bot._format_active_orders_line(parsed, result, "fallback")
+
+        self.assertIn("| CHECK_ERROR | Нестабільна відповідь сервісу", line)
 
 
 if __name__ == "__main__":

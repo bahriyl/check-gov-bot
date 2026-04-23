@@ -23,6 +23,27 @@ class ManualEntryState:
     parsed: ParsedReceipt | None = None
 
 
+@dataclass
+class ActiveOrderTask:
+    order_key: str
+    order_prefix: str
+    image_idx: int
+    image_total: int
+    image_url: str
+
+
+@dataclass
+class ActiveOrdersState:
+    source_message: telebot.types.Message
+    test_mode: bool
+    tasks: list[ActiveOrderTask]
+    next_index: int = 0
+    lines_by_order: dict[str, list[str]] | None = None
+    order_labels: dict[str, str] | None = None
+    waiting_task: ActiveOrderTask | None = None
+    waiting_parsed: ParsedReceipt | None = None
+
+
 class ReceiptBot:
     MANUAL_ENTRY_PROVIDERS: tuple[tuple[str, str], ...] = (
         ("abank", "А-Банк"),
@@ -33,7 +54,6 @@ class ReceiptBot:
         ("privatbank", "Приватбанк"),
         ("pumb", "ПУМБ"),
         ("sensbank", "СЕНС БАНК"),
-        ("forwardbank", "Форвард банк"),
     )
 
     def __init__(self, settings: Settings) -> None:
@@ -49,6 +69,7 @@ class ReceiptBot:
         )
         self.privat_checker = PrivatChecker(timeout_seconds=settings.http_timeout_seconds)
         self._manual_context: dict[tuple[int, int], ManualEntryState] = {}
+        self._active_orders_context: dict[tuple[int, int], ActiveOrdersState] = {}
 
         self.binance_client: BinanceP2PClient | None = None
         if settings.binance_api_key and settings.binance_secret_key:
@@ -109,6 +130,14 @@ class ReceiptBot:
         @self.bot.callback_query_handler(func=lambda call: (call.data or "") == "manual_cancel")
         def _manual_cancel_callback(call: telebot.types.CallbackQuery) -> None:
             self._handle_manual_cancel_callback(call)
+
+        @self.bot.callback_query_handler(func=lambda call: (call.data or "").startswith("active_manual_provider:"))
+        def _active_manual_provider_callback(call: telebot.types.CallbackQuery) -> None:
+            self._handle_active_manual_provider_callback(call)
+
+        @self.bot.callback_query_handler(func=lambda call: (call.data or "") == "active_manual_skip")
+        def _active_manual_skip_callback(call: telebot.types.CallbackQuery) -> None:
+            self._handle_active_manual_skip_callback(call)
 
         @self.bot.message_handler(func=lambda _: True)
         def _fallback(message: telebot.types.Message) -> None:
@@ -171,16 +200,16 @@ class ReceiptBot:
                 source="local",
                 message="Не вдалося знайти номер/код квитанції",
             )
+        if not parsed.provider_code:
+            return CheckResult(
+                status=CheckStatus.UNPARSEABLE,
+                source="local",
+                message="Не вдалося визначити банк/сервіс",
+            )
 
         if parsed.provider_code == "privatbank":
             return self.privat_checker.check(parsed.receipt_code)
-
-        provider_code = parsed.provider_code
-        if not provider_code:
-            # If OCR found only receipt code, still try check.gov provider probing.
-            return self.check_gov_checker.check("", parsed.receipt_code)
-
-        return self.check_gov_checker.check(provider_code, parsed.receipt_code)
+        return self.check_gov_checker.check(parsed.provider_code, parsed.receipt_code)
 
     @staticmethod
     def _sanitize_manual_receipt_code(code: str) -> str:
@@ -230,7 +259,14 @@ class ReceiptBot:
         markup = InlineKeyboardMarkup()
         for provider_code, label in self.MANUAL_ENTRY_PROVIDERS:
             markup.row(InlineKeyboardButton(text=label, callback_data=f"manual_provider:{provider_code}"))
-        markup.row(InlineKeyboardButton(text="Скасувати", callback_data="manual_cancel"))
+        markup.row(InlineKeyboardButton(text="Скасувати перевірку", callback_data="manual_cancel"))
+        return markup
+
+    def _build_active_manual_provider_menu(self) -> InlineKeyboardMarkup:
+        markup = InlineKeyboardMarkup()
+        for provider_code, label in self.MANUAL_ENTRY_PROVIDERS:
+            markup.row(InlineKeyboardButton(text=label, callback_data=f"active_manual_provider:{provider_code}"))
+        markup.row(InlineKeyboardButton(text="Пропустити цю квитанцію", callback_data="active_manual_skip"))
         return markup
 
     @staticmethod
@@ -314,6 +350,9 @@ class ReceiptBot:
             f"Джерело перевірки: {result.source}",
             f"Статус: {status_emoji.get(result.status, '🚨')}",
         ]
+        reason = (result.message or "").strip()
+        if reason:
+            lines.append(f"Деталі: {reason}")
         payment = result.details.get("payment") if isinstance(result.details, dict) else None
         if isinstance(payment, dict):
             if payment.get("amount") is not None:
@@ -382,10 +421,15 @@ class ReceiptBot:
                 source="local",
                 message="Не вдалося знайти номер/код квитанції",
             )
+        if not parsed.provider_code:
+            return CheckResult(
+                status=CheckStatus.UNPARSEABLE,
+                source="local",
+                message="Не вдалося визначити банк/сервіс",
+            )
         if parsed.provider_code == "privatbank":
             return self.privat_checker.check(parsed.receipt_code)
-        provider_code = parsed.provider_code or ""
-        return self.check_gov_checker.check(provider_code, parsed.receipt_code, reload_before_check=True)
+        return self.check_gov_checker.check(parsed.provider_code, parsed.receipt_code, reload_before_check=True)
 
     def _format_active_orders_line(self, parsed: ParsedReceipt | None, result: CheckResult | None, fallback: str) -> str:
         if not parsed or not result:
@@ -398,7 +442,115 @@ class ReceiptBot:
         if isinstance(payment, dict):
             amount = str(payment.get("amount") or "?")
             card = str(payment.get("recipient_card") or "?")
-        return f"{self._status_icon(result)} {amount} - {card} | {provider} | {code} | {result.status.value}"
+        line = f"{self._status_icon(result)} {amount} - {card} | {provider} | {code} | {result.status.value}"
+        reason = (result.message or "").strip()
+        if result.status != CheckStatus.VALID and reason:
+            line = f"{line} | {reason}"
+        return line
+
+    def _active_key(self, message: telebot.types.Message) -> tuple[int, int]:
+        from_user = getattr(message, "from_user", None)
+        user_id = from_user.id if from_user else 0
+        return (message.chat.id, user_id)
+
+    def _send_active_unknown_provider_prompt(self, state: ActiveOrdersState, task: ActiveOrderTask, parsed: ParsedReceipt) -> None:
+        chat_id = state.source_message.chat.id
+        text = (
+            f"Не вдалося визначити банк для квитанції {task.image_idx}/{task.image_total}.\n"
+            f"Код квитанції: {parsed.receipt_code or 'Не знайдено'}\n"
+            "Оберіть банк/сервіс або пропустіть цю квитанцію."
+        )
+        try:
+            self.bot.send_photo(
+                chat_id,
+                task.image_url,
+                caption=text,
+                reply_markup=self._build_active_manual_provider_menu(),
+                reply_to_message_id=state.source_message.message_id,
+            )
+        except Exception:
+            self.bot.send_message(
+                chat_id,
+                f"{text}\nФото: {task.image_url}",
+                reply_markup=self._build_active_manual_provider_menu(),
+                reply_to_message_id=state.source_message.message_id,
+            )
+
+    def _finalize_active_orders_state(self, state: ActiveOrdersState) -> None:
+        blocks: list[str] = []
+        for order_key, label in (state.order_labels or {}).items():
+            lines = (state.lines_by_order or {}).get(order_key) or []
+            if not lines:
+                continue
+            blocks.append(f"{label}:\n" + "\n".join(lines))
+        if not blocks:
+            self.bot.send_message(
+                state.source_message.chat.id,
+                "У чатах активних ордерів не знайдено валідних фото-квитанцій",
+                reply_to_message_id=state.source_message.message_id,
+            )
+            return
+        self._send_long_text(
+            state.source_message.chat.id,
+            "\n\n".join(blocks),
+            reply_to_message_id=state.source_message.message_id,
+        )
+
+    def _continue_active_orders_scan(self, key: tuple[int, int]) -> None:
+        state = self._active_orders_context.get(key)
+        if not state:
+            return
+        while state.next_index < len(state.tasks):
+            task = state.tasks[state.next_index]
+            parsed: ParsedReceipt | None = None
+            result: CheckResult | None = None
+            temp_path: Path | None = None
+            try:
+                temp_path = self._download_remote_image(task.image_url)
+                payload = extract_ocr_payload(temp_path)
+                parsed = parse_receipt_text(payload.text, self.providers, docai_document=payload.docai_document)
+            except OCRError as exc:
+                (state.lines_by_order or {}).setdefault(task.order_key, []).append(
+                    f"{task.image_idx}. {self._format_active_orders_line(None, None, f'Помилка OCR: {exc}')}"
+                )
+                state.next_index += 1
+                continue
+            except Exception as exc:
+                (state.lines_by_order or {}).setdefault(task.order_key, []).append(
+                    f"{task.image_idx}. {self._format_active_orders_line(None, None, f'Помилка завантаження: {exc}')}"
+                )
+                state.next_index += 1
+                continue
+            finally:
+                if temp_path and temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+
+            if not parsed.receipt_code:
+                (state.lines_by_order or {}).setdefault(task.order_key, []).append(
+                    f"{task.image_idx}. {self._format_active_orders_line(parsed, None, 'Не вдалося знайти код квитанції')}"
+                )
+                state.next_index += 1
+                continue
+
+            if not parsed.provider_code:
+                state.waiting_task = task
+                state.waiting_parsed = parsed
+                self._send_active_unknown_provider_prompt(state, task, parsed)
+                return
+
+            try:
+                result = self._run_check_for_active_orders(parsed)
+                (state.lines_by_order or {}).setdefault(task.order_key, []).append(
+                    f"{task.image_idx}. {self._format_active_orders_line(parsed, result, 'Помилка перевірки')}"
+                )
+            except Exception as exc:
+                (state.lines_by_order or {}).setdefault(task.order_key, []).append(
+                    f"{task.image_idx}. {self._format_active_orders_line(parsed, None, f'Помилка перевірки: {exc}')}"
+                )
+            state.next_index += 1
+
+        self._finalize_active_orders_state(state)
+        self._active_orders_context.pop(key, None)
 
     def _handle_orders_scan(
         self,
@@ -421,19 +573,11 @@ class ReceiptBot:
             f"start scan chat_id={message.chat.id} trade_type_filter={trade_type_filter_norm or 'ALL'}",
         )
 
-        progress_label = "тестові неактивні" if test_mode else "активні"
-        if trade_type_filter_norm:
-            progress_label = f"{progress_label} ({self._trade_type_label(trade_type_filter_norm)})"
-        progress = self.bot.send_message(message.chat.id, f"🔄 Завантажую {progress_label} ордери Binance")
-        progress_message_id = progress.message_id
-
         try:
             if test_mode:
                 if not self.settings.binance_test_non_active_order_numbers:
-                    self._safe_edit_or_send(
-                        message.chat.id,
-                        progress_message_id,
-                        "Не вказано BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS для /test_active_orders",
+                    self.bot.send_message(
+                        message.chat.id, "Не вказано BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS для /test_active_orders"
                     )
                     self._debug_test_active_orders_log(test_mode, "missing BINANCE_TEST_NON_ACTIVE_ORDER_NUMBERS, abort")
                     return
@@ -459,28 +603,28 @@ class ReceiptBot:
                     empty_message = f"Активних ордерів типу {self._trade_type_label(trade_type_filter_norm)} не знайдено"
                 else:
                     empty_message = "Активних ордерів не знайдено"
-                self._safe_edit_or_send(message.chat.id, progress_message_id, empty_message)
+                self.bot.send_message(message.chat.id, empty_message, reply_to_message_id=message.message_id)
                 self._debug_test_active_orders_log(test_mode, "no orders after filtering, abort")
                 return
 
-            output_blocks: list[str] = []
+            tasks: list[ActiveOrderTask] = []
+            order_labels: dict[str, str] = {}
+            lines_by_order: dict[str, list[str]] = {}
             for idx, order in enumerate(orders, start=1):
                 self._debug_test_active_orders_log(
                     test_mode,
                     f"order {idx}/{len(orders)} number={order.order_number} trade_type={order.trade_type} total={order.total_amount}",
                 )
-                self._safe_edit_or_send(
-                    message.chat.id,
-                    progress_message_id,
-                    f"📥 Збираю дані для ордера {idx}/{len(orders)}: {order.order_number}",
-                )
+                order_amount = self._format_amount_for_order(order.total_amount)
+                order_key = str(order.order_number)
+                order_labels[order_key] = f"{self._order_prefix(order.trade_type)} {order_amount}"
+                lines_by_order.setdefault(order_key, [])
                 chat_messages = self.binance_client.get_chat_messages(order.order_number)
                 self._debug_test_active_orders_log(
                     test_mode, f"order {order.order_number}: chat messages count={len(chat_messages)}"
                 )
                 if not chat_messages:
-                    order_amount = self._format_amount_for_order(order.total_amount)
-                    output_blocks.append(f"{self._order_prefix(order.trade_type)} {order_amount}:\n⚠️ Немає повідомлень чату ордера")
+                    lines_by_order[order_key].append("⚠️ Немає повідомлень чату ордера")
                     self._debug_test_active_orders_log(test_mode, f"order {order.order_number}: no chat messages")
                     continue
                 seen_urls: set[str] = set()
@@ -496,134 +640,35 @@ class ReceiptBot:
                     test_mode, f"order {order.order_number}: unique image urls count={len(image_urls)}"
                 )
                 if not image_urls:
-                    order_amount = self._format_amount_for_order(order.total_amount)
-                    output_blocks.append(f"{self._order_prefix(order.trade_type)} {order_amount}:\n⚠️ У чаті ордера немає зображень")
+                    lines_by_order[order_key].append("⚠️ У чаті ордера немає зображень")
                     self._debug_test_active_orders_log(test_mode, f"order {order.order_number}: no images")
                     continue
-
-                lines: list[str] = []
                 for image_idx, image_url in enumerate(image_urls, start=1):
-                    parsed: ParsedReceipt | None = None
-                    result: CheckResult | None = None
-                    temp_path: Path | None = None
-
-                    self._safe_edit_or_send(
-                        message.chat.id,
-                        progress_message_id,
-                        f"🔎 OCR зображення {image_idx}/{len(image_urls)} для ордера {order.order_number}",
+                    tasks.append(
+                        ActiveOrderTask(
+                            order_key=order_key,
+                            order_prefix=order_labels[order_key],
+                            image_idx=image_idx,
+                            image_total=len(image_urls),
+                            image_url=image_url,
+                        )
                     )
-                    self._debug_test_active_orders_log(
-                        test_mode,
-                        f"order {order.order_number}: image {image_idx}/{len(image_urls)} download start url={image_url}",
-                    )
-                    try:
-                        temp_path = self._download_remote_image(image_url)
-                        self._debug_test_active_orders_log(
-                            test_mode,
-                            f"order {order.order_number}: image {image_idx} downloaded path={temp_path}",
-                        )
-                        payload = extract_ocr_payload(temp_path)
-                        parsed = parse_receipt_text(
-                            payload.text,
-                            self.providers,
-                            docai_document=payload.docai_document,
-                        )
-                        self._debug_test_active_orders_log(
-                            test_mode,
-                            f"order {order.order_number}: image {image_idx} OCR parsed provider={parsed.provider_code} code={parsed.receipt_code}",
-                        )
-                    except OCRError as exc:
-                        lines.append(f"{image_idx}. {self._format_active_orders_line(None, None, f'Помилка OCR: {exc}')}")
-                        self._debug_test_active_orders_log(
-                            test_mode, f"order {order.order_number}: image {image_idx} OCR error={exc}"
-                        )
-                        continue
-                    except Exception as exc:
-                        lines.append(
-                            f"{image_idx}. {self._format_active_orders_line(None, None, f'Помилка завантаження/OCR: {exc}')}"
-                        )
-                        self._debug_test_active_orders_log(
-                            test_mode, f"order {order.order_number}: image {image_idx} download/OCR error={exc}"
-                        )
-                        continue
-                    finally:
-                        if temp_path and temp_path.exists():
-                            temp_path.unlink(missing_ok=True)
-                            self._debug_test_active_orders_log(
-                                test_mode,
-                                f"order {order.order_number}: image {image_idx} temp file removed",
-                            )
-
-                    if not parsed.receipt_code:
-                        lines.append(
-                            f"{image_idx}. {self._format_active_orders_line(parsed, None, 'Не вдалося знайти код квитанції')}"
-                        )
-                        self._debug_test_active_orders_log(
-                            test_mode, f"order {order.order_number}: image {image_idx} missing receipt code"
-                        )
-                        continue
-
-                    self._safe_edit_or_send(
-                        message.chat.id,
-                        progress_message_id,
-                        f"🌐 Перевіряю квитанцію {image_idx}/{len(image_urls)} для ордера {order.order_number}",
-                    )
-                    self._debug_test_active_orders_log(
-                        test_mode, f"order {order.order_number}: image {image_idx} check start"
-                    )
-                    try:
-                        result = self._run_check_for_active_orders(parsed)
-                        lines.append(f"{image_idx}. {self._format_active_orders_line(parsed, result, 'Помилка перевірки')}")
-                        self._debug_test_active_orders_log(
-                            test_mode,
-                            f"order {order.order_number}: image {image_idx} check result status={result.status.value} source={result.source}",
-                        )
-                    except Exception as exc:
-                        lines.append(
-                            f"{image_idx}. {self._format_active_orders_line(parsed, None, f'Помилка перевірки: {exc}')}"
-                        )
-                        self._debug_test_active_orders_log(
-                            test_mode, f"order {order.order_number}: image {image_idx} check error={exc}"
-                        )
-
-                order_amount = self._format_amount_for_order(order.total_amount)
-                output_blocks.append(f"{self._order_prefix(order.trade_type)} {order_amount}:\n" + "\n".join(lines))
-                self._debug_test_active_orders_log(
-                    test_mode,
-                    f"order {order.order_number}: completed lines={len(lines)}",
-                )
-
-            if not output_blocks:
-                self._safe_edit_or_send(message.chat.id, progress_message_id, "У чатах активних ордерів не знайдено валідних фото-квитанцій")
-                self._debug_test_active_orders_log(test_mode, "no output blocks built")
-                return
-
-            self._safe_edit_or_send(message.chat.id, progress_message_id, "🧾 Формую підсумок перевірки")
-            summary = "\n\n".join(output_blocks)
-            self._debug_test_active_orders_log(
-                test_mode,
-                f"summary prepared blocks={len(output_blocks)} chars={len(summary)}",
+            state = ActiveOrdersState(
+                source_message=message,
+                test_mode=test_mode,
+                tasks=tasks,
+                lines_by_order=lines_by_order,
+                order_labels=order_labels,
             )
-            try:
-                self.bot.delete_message(message.chat.id, progress_message_id)
-            except Exception:
-                pass
-            self._send_long_text(message.chat.id, summary, reply_to_message_id=message.message_id)
-            self._debug_test_active_orders_log(test_mode, "summary sent")
+            key = self._active_key(message)
+            self._active_orders_context[key] = state
+            self._continue_active_orders_scan(key)
         except BinanceAPIError as exc:
-            self._safe_edit_or_send(
-                message.chat.id,
-                progress_message_id,
-                f"Помилка Binance API: {exc}",
-                fallback_to_message_id=message.message_id,
-            )
+            self.bot.send_message(message.chat.id, f"Помилка Binance API: {exc}", reply_to_message_id=message.message_id)
             self._debug_test_active_orders_log(test_mode, f"Binance API error={exc}")
         except Exception as exc:
-            self._safe_edit_or_send(
-                message.chat.id,
-                progress_message_id,
-                f"Помилка обробки активних ордерів: {exc}",
-                fallback_to_message_id=message.message_id,
+            self.bot.send_message(
+                message.chat.id, f"Помилка обробки активних ордерів: {exc}", reply_to_message_id=message.message_id
             )
             self._debug_test_active_orders_log(test_mode, f"processing error={exc}")
         finally:
@@ -693,6 +738,23 @@ class ReceiptBot:
             self.bot.answer_callback_query(call.id, "Помилка контексту")
             return
 
+        key = (chat_id, user_id)
+        pending = self._manual_context.get(key)
+        if pending and pending.stage == "await_provider_receipt" and pending.parsed and pending.parsed.receipt_code:
+            parsed = ParsedReceipt(
+                bank_label=provider_map[provider_code],
+                bank_key=provider_code,
+                provider_code=provider_code,
+                receipt_code=pending.parsed.receipt_code,
+                confidence=1.0,
+                raw_text=pending.parsed.raw_text,
+            )
+            result = self._run_check(parsed)
+            self._manual_context.pop(key, None)
+            self.bot.answer_callback_query(call.id, "Перевіряю квитанцію")
+            self.bot.send_message(chat_id, self._format_reply(parsed, result), reply_markup=self._build_manual_button(parsed))
+            return
+
         parsed = ParsedReceipt(
             bank_label=provider_map[provider_code],
             bank_key=provider_code,
@@ -701,7 +763,7 @@ class ReceiptBot:
             confidence=0.0,
             raw_text="",
         )
-        self._manual_context[(chat_id, user_id)] = ManualEntryState(stage="await_code", parsed=parsed)
+        self._manual_context[key] = ManualEntryState(stage="await_code", parsed=parsed)
         self.bot.answer_callback_query(call.id, "Введіть код квитанції")
         self.bot.send_message(
             chat_id,
@@ -722,6 +784,62 @@ class ReceiptBot:
             return
         self.bot.answer_callback_query(call.id, "Скасовано")
         self.bot.send_message(chat_id, "Ручне введення коду скасовано")
+
+    def _handle_active_manual_provider_callback(self, call: telebot.types.CallbackQuery) -> None:
+        data = call.data or ""
+        provider_code = data.split(":", 1)[1] if ":" in data else ""
+        provider_map = dict(self.MANUAL_ENTRY_PROVIDERS)
+        if provider_code not in provider_map:
+            self.bot.answer_callback_query(call.id, "Невідомий банк/сервіс")
+            return
+        if not call.message:
+            self.bot.answer_callback_query(call.id, "Помилка контексту")
+            return
+        key = self._active_key(call.message)
+        state = self._active_orders_context.get(key)
+        if not state or not state.waiting_task or not state.waiting_parsed:
+            self.bot.answer_callback_query(call.id, "Немає квитанції для ручного вибору")
+            return
+        parsed = ParsedReceipt(
+            bank_label=provider_map[provider_code],
+            bank_key=provider_code,
+            provider_code=provider_code,
+            receipt_code=state.waiting_parsed.receipt_code,
+            confidence=1.0,
+            raw_text=state.waiting_parsed.raw_text,
+        )
+        task = state.waiting_task
+        try:
+            result = self._run_check_for_active_orders(parsed)
+            (state.lines_by_order or {}).setdefault(task.order_key, []).append(
+                f"{task.image_idx}. {self._format_active_orders_line(parsed, result, 'Помилка перевірки')}"
+            )
+        except Exception as exc:
+            (state.lines_by_order or {}).setdefault(task.order_key, []).append(
+                f"{task.image_idx}. {self._format_active_orders_line(parsed, None, f'Помилка перевірки: {exc}')}"
+            )
+        state.waiting_task = None
+        state.waiting_parsed = None
+        state.next_index += 1
+        self.bot.answer_callback_query(call.id, "Квитанцію перевірено")
+        self._continue_active_orders_scan(key)
+
+    def _handle_active_manual_skip_callback(self, call: telebot.types.CallbackQuery) -> None:
+        if not call.message:
+            self.bot.answer_callback_query(call.id, "Помилка контексту")
+            return
+        key = self._active_key(call.message)
+        state = self._active_orders_context.get(key)
+        if not state or not state.waiting_task:
+            self.bot.answer_callback_query(call.id, "Немає квитанції для пропуску")
+            return
+        task = state.waiting_task
+        (state.lines_by_order or {}).setdefault(task.order_key, []).append(f"{task.image_idx}. ⚠️ Квитанцію пропущено вручну")
+        state.waiting_task = None
+        state.waiting_parsed = None
+        state.next_index += 1
+        self.bot.answer_callback_query(call.id, "Квитанцію пропущено")
+        self._continue_active_orders_scan(key)
 
     def _handle_manual_code_message_if_pending(self, message: telebot.types.Message) -> bool:
         chat_id = message.chat.id
@@ -755,6 +873,29 @@ class ReceiptBot:
                 "Введіть код квитанції вручну одним повідомленням",
                 reply_markup=self._build_manual_cancel_menu(),
             )
+            return True
+
+        if pending.stage == "await_provider_receipt":
+            matched_provider = self._resolve_manual_provider_from_text(message.text or "")
+            if not matched_provider or not pending.parsed or not pending.parsed.receipt_code:
+                self.bot.reply_to(
+                    message,
+                    "Оберіть банк/сервіс кнопками вище або введіть назву/код банку зі списку. Для виходу натисніть «Скасувати перевірку».",
+                )
+                return True
+            provider_code, provider_label = matched_provider
+            parsed = ParsedReceipt(
+                bank_label=provider_label,
+                bank_key=provider_code,
+                provider_code=provider_code,
+                receipt_code=pending.parsed.receipt_code,
+                confidence=1.0,
+                raw_text=pending.parsed.raw_text,
+            )
+            result = self._run_check(parsed)
+            self.bot.reply_to(message, self._format_reply(parsed, result), reply_markup=self._build_manual_button(parsed))
+            self._manual_context.pop(key, None)
+            self._close_check_gov_session()
             return True
 
         if pending.stage != "await_code" or not pending.parsed:
@@ -797,6 +938,21 @@ class ReceiptBot:
                 self.providers,
                 docai_document=payload.docai_document,
             )
+            if parsed.receipt_code and not parsed.provider_code:
+                user_id = message.from_user.id if message.from_user else 0
+                self._manual_context[(message.chat.id, user_id)] = ManualEntryState(
+                    stage="await_provider_receipt",
+                    parsed=parsed,
+                )
+                self._safe_edit_or_send(
+                    message.chat.id,
+                    progress_message_id,
+                    "Не вдалося визначити банк автоматично. Оберіть банк/сервіс для перевірки:",
+                    fallback_to_message_id=message.message_id,
+                    reply_markup=self._build_manual_provider_menu(),
+                )
+                result_sent = True
+                return
             self._safe_edit_or_send(message.chat.id, progress_message_id, "🌐 Перевіряю квитанцію")
             result = self._run_check(parsed)
             self._safe_edit_or_send(

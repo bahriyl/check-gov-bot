@@ -29,7 +29,7 @@ class _CheckGovStub:
 
 
 class BotRunCheckTests(unittest.TestCase):
-    def test_unknown_provider_still_uses_check_gov(self) -> None:
+    def test_unknown_provider_returns_unparseable(self) -> None:
         check_gov = _CheckGovStub()
         bot_like = SimpleNamespace(check_gov_checker=check_gov, privat_checker=_PrivatStub())
         parsed = ParsedReceipt(
@@ -43,8 +43,8 @@ class BotRunCheckTests(unittest.TestCase):
 
         result = ReceiptBot._run_check(bot_like, parsed)
 
-        self.assertEqual(result.status, CheckStatus.VALID)
-        self.assertEqual(check_gov.calls, [("", "9B1K-AKB5-C1MP-26B6", False)])
+        self.assertEqual(result.status, CheckStatus.UNPARSEABLE)
+        self.assertEqual(check_gov.calls, [])
 
     def test_active_orders_check_uses_reload_before_check(self) -> None:
         check_gov = _CheckGovStub()

@@ -5,12 +5,6 @@ from app.types import CheckStatus
 
 
 class CheckGovCheckerTests(unittest.TestCase):
-    def test_provider_candidates_include_common_forms(self) -> None:
-        variants = CheckGovChecker._provider_candidates("a-bank")
-        self.assertIn("a-bank", variants)
-        self.assertIn("abank", variants)
-        self.assertIn("a_bank", variants)
-
     def test_retryable_internal_error_then_valid(self) -> None:
         checker = CheckGovChecker()
         calls = []
@@ -42,23 +36,20 @@ class CheckGovCheckerTests(unittest.TestCase):
         self.assertEqual(payment.get("amount"), "300")
         self.assertEqual(payment.get("recipient_card"), "444111******1722")
 
-    def test_unsupported_company_fallback_to_monobank(self) -> None:
+    def test_unsupported_company_returns_check_error(self) -> None:
         checker = CheckGovChecker()
         calls = []
 
         def fake_check(provider_code: str, receipt_code: str):
             calls.append(provider_code)
-            if provider_code != "monobank":
-                return 200, {"textUk": "Щось пішло не так...", "eInfo": "unsupported company"}, ""
-            return 200, {"payments": [{"id": 1, "recipient": "User, 444111******1722", "amount": 200}]}, ""
+            return 200, {"textUk": "Щось пішло не так...", "eInfo": "unsupported company"}, ""
 
         checker._check_in_browser = fake_check  # type: ignore[method-assign]
         checker.close = lambda: None  # type: ignore[assignment]
 
         result = checker.check("some-wrong-provider", "KPT2-0T15-39BM-HX28")
-        self.assertEqual(result.status, CheckStatus.VALID)
-        self.assertIn("monobank", calls)
-        self.assertEqual(result.details.get("payment", {}).get("amount"), "200")
+        self.assertEqual(result.status, CheckStatus.CHECK_ERROR)
+        self.assertEqual(calls, ["some-wrong-provider", "some-wrong-provider"])
 
     def test_ui_paid_result_without_payments_is_valid(self) -> None:
         checker = CheckGovChecker()
@@ -111,6 +102,33 @@ class CheckGovCheckerTests(unittest.TestCase):
         result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
         self.assertEqual(result.status, CheckStatus.VALID)
         self.assertEqual(reload_calls, [])
+
+    def test_uncertain_response_returns_check_error(self) -> None:
+        checker = CheckGovChecker()
+        checker._check_in_browser = lambda *_args: (200, {"ui": {"check_result_text": "..."}} , "")  # type: ignore[method-assign]
+        checker.close = lambda: None  # type: ignore[assignment]
+
+        result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
+
+        self.assertEqual(result.status, CheckStatus.CHECK_ERROR)
+        self.assertIn("невизначена", result.message.lower())
+
+    def test_browser_errors_stop_after_two_attempts(self) -> None:
+        checker = CheckGovChecker()
+        calls = []
+
+        def fake_check(*_args):
+            calls.append(1)
+            raise RuntimeError("boom")
+
+        checker._check_in_browser = fake_check  # type: ignore[method-assign]
+        checker.close = lambda: None  # type: ignore[assignment]
+
+        result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
+
+        self.assertEqual(result.status, CheckStatus.CHECK_ERROR)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("зациклен", result.message.lower())
 
 
 if __name__ == "__main__":

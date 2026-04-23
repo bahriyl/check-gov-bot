@@ -36,6 +36,20 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(parsed.provider_code, "privatbank")
         self.assertEqual(parsed.receipt_code, "P24A5738337141D5456")
 
+    def test_legal_name_aliases_detect_provider(self) -> None:
+        text = """
+        Платіжна інструкція
+        Код документа 9B1K-AKB5-C1MP-26B6
+        АТ "УНІВЕРСАЛ БАНК"
+        """
+        parsed = parse_receipt_text(text, self.providers)
+        self.assertEqual(parsed.provider_code, "monobank")
+
+    def test_no_code_shape_provider_heuristics(self) -> None:
+        text = "Квитанція № 2300-8317-6223-0167"
+        parsed = parse_receipt_text(text, self.providers)
+        self.assertIsNone(parsed.provider_code)
+
     def test_does_not_extract_amount_or_card_from_ocr_text(self) -> None:
         text = """
         Квитанція

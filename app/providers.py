@@ -57,11 +57,48 @@ class ProviderRegistry:
             norm_name = self._normalize_text(name)
             aliases = {norm_name, norm_name.replace("-", " "), code.lower()}
             if code == "privatbank":
-                aliases.update({"приват", "приватбанк", "privat"})
+                aliases.update(
+                    {
+                        "приват",
+                        "приватбанк",
+                        "privat",
+                        self._normalize_text('АТ КБ ПРИВАТБАНК'),
+                    }
+                )
             if code == "monobank":
-                aliases.update({"mono", "monobank", "універсал банк"})
+                aliases.update(
+                    {
+                        "mono",
+                        "monobank",
+                        "універсал банк",
+                        self._normalize_text('АТ "УНІВЕРСАЛ БАНК"'),
+                    }
+                )
             if code == "abank":
-                aliases.update({"а банк", "a bank", "a-bank", "а-банк"})
+                aliases.update(
+                    {
+                        "а банк",
+                        "a bank",
+                        "a-bank",
+                        "а-банк",
+                        self._normalize_text('АКЦІОНЕРНЕ ТОВАРИСТВО "АКЦЕНТ-БАНК"'),
+                    }
+                )
+            if code == "altabank":
+                aliases.update(
+                    {
+                        self._normalize_text('АТ "АЛЬТБАНК"'),
+                        self._normalize_text('AT "АЛЬТБАНК"'),
+                    }
+                )
+            if code == "vostok":
+                aliases.add(self._normalize_text('АТ "ВСТ БАНК"'))
+            if code == "mtb":
+                aliases.add(self._normalize_text('ПАТ "МТБ БАНК"'))
+            if code == "pumb":
+                aliases.add(self._normalize_text('АТ "ПУМБ"'))
+            if code == "sensbank":
+                aliases.add(self._normalize_text('АТ "СЕНС БАНК"'))
             providers[code] = Provider(code=code, name=name, aliases=aliases)
         self._providers = providers
 

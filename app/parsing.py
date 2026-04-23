@@ -103,13 +103,6 @@ def parse_receipt_text(
     code = _extract_code(cleaned)
     provider = providers.find_provider_by_text(cleaned)
 
-    if not provider and code:
-        upper_code = code.upper()
-        if upper_code.startswith("P24A"):
-            provider = providers.providers.get("privatbank")
-        elif re.fullmatch(r"\d{4}(?:-\d{4}){3,4}", upper_code):
-            provider = providers.providers.get("abank")
-
     bank_key = provider.code if provider else None
     bank_label = provider.name if provider else None
 
