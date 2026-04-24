@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from playwright.async_api import async_playwright
-
-from app.async_runner import AsyncLoopRunner
+import requests
 
 
 @dataclass
@@ -17,12 +16,13 @@ class Provider:
 
 
 class ProviderRegistry:
+    CHECK_GOV_JS = "https://check.gov.ua/js/index.js"
+
     def __init__(self, headless: bool = True, refresh_hours: int = 6) -> None:
-        self._headless = headless
+        del headless
         self._refresh_hours = refresh_hours
         self._providers: dict[str, Provider] = {}
         self._last_refresh: datetime | None = None
-        self._runner = AsyncLoopRunner("providers-playwright-loop")
         self._seed_defaults()
 
     @property
@@ -147,71 +147,29 @@ class ProviderRegistry:
             return
         self.refresh_from_check_gov()
 
-    async def refresh_from_check_gov_async(self) -> list[tuple[str, str]]:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=self._headless)
-            page = await browser.new_page()
-            try:
-                await page.goto("https://check.gov.ua/", wait_until="networkidle", timeout=30000)
-                options = await page.evaluate(
-                    """
-                    () => {
-                      const normalize = (value) => String(value || '').trim();
-                      const parseAliases = (raw) => {
-                        try {
-                          const parsed = JSON.parse(raw || '[]');
-                          return Array.isArray(parsed) ? parsed.map((x) => normalize(x).toLowerCase()) : [];
-                        } catch (_err) {
-                          return [];
-                        }
-                      };
+    def _fetch_provider_options(self) -> list[tuple[str, str]]:
+        resp = requests.get(self.CHECK_GOV_JS, timeout=20)
+        resp.raise_for_status()
+        js = resp.text
 
-                      const out = [];
-                      const seen = new Set();
-                      const add = (code, name) => {
-                        const c = normalize(code).toLowerCase();
-                        const n = normalize(name);
-                        if (!c || c === '0' || seen.has(c)) return;
-                        seen.add(c);
-                        out.push([c, n || code]);
-                      };
-
-                      const select = document.querySelector('#company');
-                      if (select) {
-                        for (const option of Array.from(select.options || [])) {
-                          const code = normalize(option.value);
-                          const name = normalize(option.textContent || '');
-                          if (!code || code === '0') continue;
-                          add(code, name);
-                        }
-                      }
-
-                      const listItems = Array.from(document.querySelectorAll('#companyBlock .selection-list div'));
-                      for (const item of listItems) {
-                        const name = normalize(item.textContent || '');
-                        const aliases = parseAliases(item.getAttribute('alt'));
-                        const aliasCode = aliases.find((a) => /^[a-z0-9_-]{2,}$/.test(a));
-                        if (aliasCode) {
-                          add(aliasCode, name);
-                        }
-                      }
-
-                      return out;
-                    }
-                    """
-                )
-                if isinstance(options, list):
-                    return [(str(code), str(name)) for code, name in options if code]
-                return []
-            finally:
-                await browser.close()
+        # Provider list is embedded as db=[{name:"...",title:"...",...}, ...]
+        matches = re.findall(r'name\s*:\s*"([a-z0-9_-]+)"\s*,\s*title\s*:\s*"([^"]+)"', js, flags=re.IGNORECASE)
+        seen: set[str] = set()
+        out: list[tuple[str, str]] = []
+        for code, title in matches:
+            key = code.strip().lower()
+            if not key or key == "0" or key in seen:
+                continue
+            seen.add(key)
+            out.append((key, title.strip() or key))
+        return out
 
     def refresh_from_check_gov(self) -> None:
         try:
-            options = self._runner.run(self.refresh_from_check_gov_async())
+            options = self._fetch_provider_options()
             if options:
                 self._set_providers(options)
-                self._last_refresh = datetime.now(tz=timezone.utc)
+            self._last_refresh = datetime.now(tz=timezone.utc)
         except Exception:
             self._last_refresh = datetime.now(tz=timezone.utc)
 
@@ -223,4 +181,4 @@ class ProviderRegistry:
         return None
 
     def close(self) -> None:
-        self._runner.close()
+        return

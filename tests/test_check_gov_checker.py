@@ -9,8 +9,8 @@ class CheckGovCheckerTests(unittest.TestCase):
         checker = CheckGovChecker()
         calls = []
 
-        def fake_check(provider_code: str, receipt_code: str, *_args, **_kwargs):
-            calls.append(provider_code)
+        def fake_once(provider_code: str, receipt_code: str):
+            calls.append((provider_code, receipt_code))
             if len(calls) == 1:
                 return 200, {"textUk": "Квитанція не знайдена", "eInfo": "internal error"}, ""
             return 200, {
@@ -26,109 +26,65 @@ class CheckGovCheckerTests(unittest.TestCase):
                 ]
             }, ""
 
-        checker._check_in_browser = fake_check  # type: ignore[method-assign]
-        checker.close = lambda: None  # type: ignore[assignment]
+        checker._check_once = fake_once  # type: ignore[method-assign]
 
         result = checker.check("a-bank", "2300-8317-6223-0167")
         self.assertEqual(result.status, CheckStatus.VALID)
-        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(len(calls), 2)
         payment = result.details.get("payment")
         self.assertEqual(payment.get("amount"), "300")
         self.assertEqual(payment.get("recipient_card"), "444111******1722")
 
     def test_unsupported_company_returns_check_error(self) -> None:
         checker = CheckGovChecker()
-        calls = []
 
-        def fake_check(provider_code: str, receipt_code: str, *_args, **_kwargs):
-            calls.append(provider_code)
-            return 200, {"textUk": "Щось пішло не так...", "eInfo": "unsupported company"}, ""
-
-        checker._check_in_browser = fake_check  # type: ignore[method-assign]
-        checker.close = lambda: None  # type: ignore[assignment]
+        checker._check_once = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
+            200,
+            {"textUk": "Щось пішло не так...", "eInfo": "unsupported company"},
+            "",
+        )
 
         result = checker.check("some-wrong-provider", "KPT2-0T15-39BM-HX28")
         self.assertEqual(result.status, CheckStatus.CHECK_ERROR)
-        self.assertEqual(calls, ["some-wrong-provider", "some-wrong-provider"])
+        self.assertIn("unsupported company", result.message)
 
-    def test_ui_paid_result_without_payments_is_valid(self) -> None:
+    def test_not_found_maps_to_not_found(self) -> None:
         checker = CheckGovChecker()
-
-        checker._check_in_browser = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
+        checker._check_once = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
             200,
-            {
-                "ui": {
-                    "check_result_text": "Квитанція Оплачена",
-                    "result_flag_text": "Оплачена",
-                    "hint_text": "",
-                }
-            },
+            {"e": 404, "textUk": "Відсутня"},
             "",
         )
-        checker.close = lambda: None  # type: ignore[assignment]
 
         result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
-        self.assertEqual(result.status, CheckStatus.VALID)
-        self.assertIn("Оплачена", result.message)
 
-    def test_reload_before_check_calls_reload_per_attempt(self) -> None:
-        checker = CheckGovChecker()
-        reload_calls: list[int] = []
-
-        checker._reload_page = lambda: reload_calls.append(1)  # type: ignore[assignment]
-        checker._check_in_browser = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
-            200,
-            {"payments": [{"id": 1, "recipient": "User, 444111******1722", "amount": 200}]},
-            "",
-        )
-        checker.close = lambda: None  # type: ignore[assignment]
-
-        result = checker.check("monobank", "KPT2-0T15-39BM-HX28", reload_before_check=True)
-        self.assertEqual(result.status, CheckStatus.VALID)
-        self.assertEqual(len(reload_calls), 1)
-
-    def test_reload_before_check_default_false(self) -> None:
-        checker = CheckGovChecker()
-        reload_calls: list[int] = []
-
-        checker._reload_page = lambda: reload_calls.append(1)  # type: ignore[assignment]
-        checker._check_in_browser = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
-            200,
-            {"payments": [{"id": 1, "recipient": "User, 444111******1722", "amount": 200}]},
-            "",
-        )
-        checker.close = lambda: None  # type: ignore[assignment]
-
-        result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
-        self.assertEqual(result.status, CheckStatus.VALID)
-        self.assertEqual(reload_calls, [])
+        self.assertEqual(result.status, CheckStatus.NOT_FOUND)
+        self.assertIn("Відсутня", result.message)
 
     def test_uncertain_response_returns_check_error(self) -> None:
         checker = CheckGovChecker()
-        checker._check_in_browser = lambda *_args, **_kwargs: (200, {"ui": {"check_result_text": "..."}} , "")  # type: ignore[method-assign]
-        checker.close = lambda: None  # type: ignore[assignment]
+        checker._check_once = lambda *_args, **_kwargs: (200, {"x": 1}, "")  # type: ignore[method-assign]
 
         result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
 
         self.assertEqual(result.status, CheckStatus.CHECK_ERROR)
         self.assertIn("невизначена", result.message.lower())
 
-    def test_browser_errors_stop_after_two_attempts(self) -> None:
+    def test_request_errors_stop_after_two_attempts(self) -> None:
         checker = CheckGovChecker()
         calls = []
 
-        def fake_check(*_args, **_kwargs):
+        def fake_once(*_args, **_kwargs):
             calls.append(1)
             raise RuntimeError("boom")
 
-        checker._check_in_browser = fake_check  # type: ignore[method-assign]
-        checker.close = lambda: None  # type: ignore[assignment]
+        checker._check_once = fake_once  # type: ignore[method-assign]
 
         result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
 
         self.assertEqual(result.status, CheckStatus.CHECK_ERROR)
         self.assertEqual(len(calls), 2)
-        self.assertIn("зациклен", result.message.lower())
+        self.assertIn("нестабільний", result.message.lower())
 
 
 if __name__ == "__main__":

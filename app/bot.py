@@ -62,14 +62,10 @@ class ReceiptBot:
         self.settings = settings
         self.bot = telebot.TeleBot(settings.bot_token, num_threads=settings.bot_handler_workers)
         self.providers = ProviderRegistry(
-            headless=settings.playwright_headless,
             refresh_hours=settings.provider_refresh_hours,
         )
         self.check_gov_checker = CheckGovChecker(
-            headless=settings.playwright_headless,
             timeout_seconds=settings.http_timeout_seconds,
-            global_parallel_limit=settings.checkgov_global_parallel_limit,
-            per_user_parallel_limit=settings.checkgov_per_user_parallel_limit,
         )
         self.privat_checker = PrivatChecker(timeout_seconds=settings.http_timeout_seconds)
         self._state_lock = Lock()
@@ -279,11 +275,6 @@ class ReceiptBot:
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton(text="Скасувати", callback_data="manual_cancel"))
         return markup
-
-    def _close_check_gov_session(self) -> None:
-        checker = getattr(self, "check_gov_checker", None)
-        if checker and hasattr(checker, "close"):
-            checker.close()
 
     @staticmethod
     def _build_user_scope(chat_id: int, user_id: int) -> str:
@@ -799,9 +790,6 @@ class ReceiptBot:
                 fallback_to_message_id=message.message_id,
             )
             self._debug_test_active_orders_log(test_mode, f"processing error={exc}")
-        finally:
-            self._close_check_gov_session()
-            self._debug_test_active_orders_log(test_mode, "check_gov session closed; scan finished")
 
     def _handle_active_orders_filter_callback(self, call: telebot.types.CallbackQuery) -> None:
         data = (call.data or "").strip().lower()
@@ -1050,7 +1038,6 @@ class ReceiptBot:
             result = self._run_check(parsed, user_scope=self._build_user_scope(chat_id, user_id))
             self.bot.reply_to(message, self._format_reply(parsed, result), reply_markup=self._build_manual_button(parsed))
             self._manual_pop(key)
-            self._close_check_gov_session()
             return True
 
         if pending.stage != "await_code" or not pending.parsed:
@@ -1077,7 +1064,6 @@ class ReceiptBot:
         )
         result = self._run_check(parsed, user_scope=self._build_user_scope(chat_id, user_id))
         self.bot.reply_to(message, self._format_reply(parsed, result), reply_markup=self._build_manual_button(parsed))
-        self._close_check_gov_session()
         self._manual_pop(key)
         return True
 
@@ -1170,8 +1156,6 @@ class ReceiptBot:
             )
             result_sent = True
         finally:
-            if result_sent:
-                self._close_check_gov_session()
             if temp_path and temp_path.exists():
                 temp_path.unlink(missing_ok=True)
 

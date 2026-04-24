@@ -12,27 +12,25 @@ Telegram bot (Python + `pytelegrambotapi`) that validates bank receipts from pho
 - Detects bank/service and extracts receipt/document code
 - Checks:
   - `ПриватБанк` via direct request to `https://privatbank.ua/pb/ajax/find-document`
-  - other providers via full browser automation on `https://check.gov.ua/` (select provider, enter receipt code, click `Перевірити`, parse rendered result)
+  - other providers via HTTP flow to `https://check.gov.ua/api/handler` (no browser automation)
 
 ## Requirements
 
 - Python 3.10+
-- Playwright Chromium browser
 
 ## Setup
 
 ```bash
 rtk python3 -m venv .venv
 rtk .venv/bin/pip install -r requirements.txt
-rtk .venv/bin/playwright install chromium
 ```
 
 Create `.env` from `.env.example` and set `BOT_TOKEN`.
-Concurrency-related env vars:
+Main runtime env vars:
 
 - `BOT_HANDLER_WORKERS` (Telegram handler worker threads, default `8`)
-- `CHECKGOV_GLOBAL_PARALLEL_LIMIT` (global max concurrent checks via `check.gov.ua`, default `8`)
-- `CHECKGOV_PER_USER_PARALLEL_LIMIT` (max concurrent checks per Telegram user scope, default `2`)
+- `HTTP_TIMEOUT_SECONDS` (HTTP timeout for receipt checks and related API calls, default `20`)
+- `PROVIDER_REFRESH_HOURS` (how often to refresh provider list from `check.gov.ua`, default `6`)
 
 For Binance active-order chat scan set:
 
@@ -74,7 +72,7 @@ Bot stores normalized provider payment data inside `CheckResult.details["payment
 
 ## Notes
 
-- Provider list for `check.gov.ua` is refreshed automatically from the website (with fallback defaults).
+- Provider list for `check.gov.ua` is refreshed automatically from website JS over HTTP (with fallback defaults).
 - Repeated `/active_orders` or `/test_active_orders` from the same user are rejected while previous scan is still running.
 - First OCR run may download PaddleOCR models and take longer.
 - If OCR quality is poor, bot may return `UNPARSEABLE`.

@@ -135,7 +135,6 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
                 SimpleNamespace(order_number="S1", trade_type="SELL", total_amount="20"),
             ]
         )
-        bot._close_check_gov_session = lambda: None
         message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99, from_user=SimpleNamespace(id=9))
 
         bot._handle_orders_scan(message, test_mode=False, trade_type_filter="BUY")
@@ -154,7 +153,6 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
             ]
         )
         bot._safe_edit_or_send = lambda *_args, **_kwargs: None
-        bot._close_check_gov_session = lambda: None
         message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99, from_user=SimpleNamespace(id=9))
 
         bot._handle_orders_scan(message, test_mode=False, trade_type_filter="SELL")
@@ -171,7 +169,6 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
             SimpleNamespace(message_type="image", image_url="https://img/2"),
         ]
         bot._download_remote_image = lambda _url: SimpleNamespace(exists=lambda: False)
-        bot._close_check_gov_session = lambda: None
         summary_holder: dict[str, str] = {}
         bot._send_long_text = lambda _chat_id, text, **_kwargs: summary_holder.update({"text": text})
         bot._run_check_for_active_orders = lambda _parsed, **_kwargs: CheckResult(
