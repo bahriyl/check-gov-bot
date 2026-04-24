@@ -9,7 +9,7 @@ class CheckGovCheckerTests(unittest.TestCase):
         checker = CheckGovChecker()
         calls = []
 
-        def fake_check(provider_code: str, receipt_code: str):
+        def fake_check(provider_code: str, receipt_code: str, *_args, **_kwargs):
             calls.append(provider_code)
             if len(calls) == 1:
                 return 200, {"textUk": "Квитанція не знайдена", "eInfo": "internal error"}, ""
@@ -40,7 +40,7 @@ class CheckGovCheckerTests(unittest.TestCase):
         checker = CheckGovChecker()
         calls = []
 
-        def fake_check(provider_code: str, receipt_code: str):
+        def fake_check(provider_code: str, receipt_code: str, *_args, **_kwargs):
             calls.append(provider_code)
             return 200, {"textUk": "Щось пішло не так...", "eInfo": "unsupported company"}, ""
 
@@ -54,7 +54,7 @@ class CheckGovCheckerTests(unittest.TestCase):
     def test_ui_paid_result_without_payments_is_valid(self) -> None:
         checker = CheckGovChecker()
 
-        checker._check_in_browser = lambda *_args: (  # type: ignore[method-assign]
+        checker._check_in_browser = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
             200,
             {
                 "ui": {
@@ -76,7 +76,7 @@ class CheckGovCheckerTests(unittest.TestCase):
         reload_calls: list[int] = []
 
         checker._reload_page = lambda: reload_calls.append(1)  # type: ignore[assignment]
-        checker._check_in_browser = lambda *_args: (  # type: ignore[method-assign]
+        checker._check_in_browser = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
             200,
             {"payments": [{"id": 1, "recipient": "User, 444111******1722", "amount": 200}]},
             "",
@@ -92,7 +92,7 @@ class CheckGovCheckerTests(unittest.TestCase):
         reload_calls: list[int] = []
 
         checker._reload_page = lambda: reload_calls.append(1)  # type: ignore[assignment]
-        checker._check_in_browser = lambda *_args: (  # type: ignore[method-assign]
+        checker._check_in_browser = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
             200,
             {"payments": [{"id": 1, "recipient": "User, 444111******1722", "amount": 200}]},
             "",
@@ -105,7 +105,7 @@ class CheckGovCheckerTests(unittest.TestCase):
 
     def test_uncertain_response_returns_check_error(self) -> None:
         checker = CheckGovChecker()
-        checker._check_in_browser = lambda *_args: (200, {"ui": {"check_result_text": "..."}} , "")  # type: ignore[method-assign]
+        checker._check_in_browser = lambda *_args, **_kwargs: (200, {"ui": {"check_result_text": "..."}} , "")  # type: ignore[method-assign]
         checker.close = lambda: None  # type: ignore[assignment]
 
         result = checker.check("monobank", "KPT2-0T15-39BM-HX28")
@@ -117,7 +117,7 @@ class CheckGovCheckerTests(unittest.TestCase):
         checker = CheckGovChecker()
         calls = []
 
-        def fake_check(*_args):
+        def fake_check(*_args, **_kwargs):
             calls.append(1)
             raise RuntimeError("boom")
 

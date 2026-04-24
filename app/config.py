@@ -5,9 +5,12 @@ import os
 @dataclass
 class Settings:
     bot_token: str
+    bot_handler_workers: int = 8
     playwright_headless: bool = True
     http_timeout_seconds: int = 20
     provider_refresh_hours: int = 6
+    checkgov_global_parallel_limit: int = 8
+    checkgov_per_user_parallel_limit: int = 2
     binance_base_url: str = "https://api.binance.com"
     binance_timeout_seconds: int = 20
     binance_api_key: str | None = None
@@ -48,9 +51,12 @@ def load_settings() -> Settings:
 
     settings = Settings(
         bot_token=token,
+        bot_handler_workers=int(os.getenv("BOT_HANDLER_WORKERS", "8")),
         playwright_headless=_env_bool("PLAYWRIGHT_HEADLESS", True),
         http_timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
         provider_refresh_hours=int(os.getenv("PROVIDER_REFRESH_HOURS", "6")),
+        checkgov_global_parallel_limit=int(os.getenv("CHECKGOV_GLOBAL_PARALLEL_LIMIT", "8")),
+        checkgov_per_user_parallel_limit=int(os.getenv("CHECKGOV_PER_USER_PARALLEL_LIMIT", "2")),
         binance_base_url=os.getenv("BINANCE_BASE_URL", "https://api.binance.com").strip()
         or "https://api.binance.com",
         binance_timeout_seconds=int(os.getenv("BINANCE_TIMEOUT_SECONDS", "20")),
@@ -77,5 +83,12 @@ def load_settings() -> Settings:
             raise RuntimeError(
                 "OCR_PROVIDER=docai requires env vars: " + ", ".join(sorted(missing))
             )
+
+    if settings.bot_handler_workers < 1:
+        raise RuntimeError("BOT_HANDLER_WORKERS must be >= 1")
+    if settings.checkgov_global_parallel_limit < 1:
+        raise RuntimeError("CHECKGOV_GLOBAL_PARALLEL_LIMIT must be >= 1")
+    if settings.checkgov_per_user_parallel_limit < 1:
+        raise RuntimeError("CHECKGOV_PER_USER_PARALLEL_LIMIT must be >= 1")
 
     return settings

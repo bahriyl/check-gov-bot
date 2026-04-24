@@ -1,4 +1,5 @@
 import unittest
+from threading import Lock
 from types import SimpleNamespace
 
 from app.bot import ManualEntryState, ReceiptBot
@@ -46,7 +47,9 @@ class BotManualEntryFlowTests(unittest.TestCase):
         bot = ReceiptBot.__new__(ReceiptBot)
         fake_telebot = _FakeTeleBot()
         bot.bot = fake_telebot
+        bot._state_lock = Lock()
         bot._manual_context = {}
+        bot._active_orders_context = {}
         provider_aliases = {
             "privatbank": {"privatbank", "приватбанк", "приват"},
             "monobank": {"monobank", "монобанк", "mono"},
@@ -125,7 +128,7 @@ class BotManualEntryFlowTests(unittest.TestCase):
     def test_pending_manual_code_message_runs_check(self) -> None:
         bot, fake_telebot = self._build_bot()
         captured: list[ParsedReceipt] = []
-        bot._run_check = lambda parsed: captured.append(parsed) or CheckResult(
+        bot._run_check = lambda parsed, **_kwargs: captured.append(parsed) or CheckResult(
             status=CheckStatus.VALID,
             source="check.gov.ua",
             message="ok",
@@ -199,7 +202,7 @@ class BotManualEntryFlowTests(unittest.TestCase):
     def test_existing_inline_manual_code_callback_still_works(self) -> None:
         bot, fake_telebot = self._build_bot()
         captured: list[ParsedReceipt] = []
-        bot._run_check = lambda parsed: captured.append(parsed) or CheckResult(
+        bot._run_check = lambda parsed, **_kwargs: captured.append(parsed) or CheckResult(
             status=CheckStatus.VALID,
             source="check.gov.ua",
             message="ok",
@@ -226,7 +229,7 @@ class BotManualEntryFlowTests(unittest.TestCase):
     def test_manual_debug_flow_text_provider_monobank_then_receipt_code(self) -> None:
         bot, fake_telebot = self._build_bot()
         captured: list[ParsedReceipt] = []
-        bot._run_check = lambda parsed: captured.append(parsed) or CheckResult(
+        bot._run_check = lambda parsed, **_kwargs: captured.append(parsed) or CheckResult(
             status=CheckStatus.VALID,
             source="check.gov.ua",
             message="ok",

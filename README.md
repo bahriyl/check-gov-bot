@@ -28,6 +28,11 @@ rtk .venv/bin/playwright install chromium
 ```
 
 Create `.env` from `.env.example` and set `BOT_TOKEN`.
+Concurrency-related env vars:
+
+- `BOT_HANDLER_WORKERS` (Telegram handler worker threads, default `8`)
+- `CHECKGOV_GLOBAL_PARALLEL_LIMIT` (global max concurrent checks via `check.gov.ua`, default `8`)
+- `CHECKGOV_PER_USER_PARALLEL_LIMIT` (max concurrent checks per Telegram user scope, default `2`)
 
 For Binance active-order chat scan set:
 
@@ -70,6 +75,7 @@ Bot stores normalized provider payment data inside `CheckResult.details["payment
 ## Notes
 
 - Provider list for `check.gov.ua` is refreshed automatically from the website (with fallback defaults).
+- Repeated `/active_orders` or `/test_active_orders` from the same user are rejected while previous scan is still running.
 - First OCR run may download PaddleOCR models and take longer.
 - If OCR quality is poor, bot may return `UNPARSEABLE`.
 

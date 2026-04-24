@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
+
+from app.async_runner import AsyncLoopRunner
 
 
 @dataclass
@@ -20,6 +22,7 @@ class ProviderRegistry:
         self._refresh_hours = refresh_hours
         self._providers: dict[str, Provider] = {}
         self._last_refresh: datetime | None = None
+        self._runner = AsyncLoopRunner("providers-playwright-loop")
         self._seed_defaults()
 
     @property
@@ -104,7 +107,6 @@ class ProviderRegistry:
 
     @staticmethod
     def _normalize_text(text: str) -> str:
-        # Normalize mixed Cyrillic/Latin lookalikes common for OCR output.
         mapping = str.maketrans(
             {
                 "А": "A",
@@ -145,13 +147,13 @@ class ProviderRegistry:
             return
         self.refresh_from_check_gov()
 
-    def refresh_from_check_gov(self) -> None:
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=self._headless)
-                page = browser.new_page()
-                page.goto("https://check.gov.ua/", wait_until="networkidle", timeout=30000)
-                options = page.evaluate(
+    async def refresh_from_check_gov_async(self) -> list[tuple[str, str]]:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=self._headless)
+            page = await browser.new_page()
+            try:
+                await page.goto("https://check.gov.ua/", wait_until="networkidle", timeout=30000)
+                options = await page.evaluate(
                     """
                     () => {
                       const normalize = (value) => String(value || '').trim();
@@ -184,8 +186,6 @@ class ProviderRegistry:
                         }
                       }
 
-                      // New custom selector UI stores aliases in .selection-list div[alt].
-                      // Use aliases to recover provider codes when available.
                       const listItems = Array.from(document.querySelectorAll('#companyBlock .selection-list div'));
                       for (const item of listItems) {
                         const name = normalize(item.textContent || '');
@@ -200,12 +200,19 @@ class ProviderRegistry:
                     }
                     """
                 )
-                browser.close()
+                if isinstance(options, list):
+                    return [(str(code), str(name)) for code, name in options if code]
+                return []
+            finally:
+                await browser.close()
+
+    def refresh_from_check_gov(self) -> None:
+        try:
+            options = self._runner.run(self.refresh_from_check_gov_async())
             if options:
                 self._set_providers(options)
                 self._last_refresh = datetime.now(tz=timezone.utc)
         except Exception:
-            # Keep defaults; runtime checking continues working.
             self._last_refresh = datetime.now(tz=timezone.utc)
 
     def find_provider_by_text(self, text: str) -> Provider | None:
@@ -214,3 +221,6 @@ class ProviderRegistry:
             if any(alias and alias in norm for alias in provider.aliases):
                 return provider
         return None
+
+    def close(self) -> None:
+        self._runner.close()

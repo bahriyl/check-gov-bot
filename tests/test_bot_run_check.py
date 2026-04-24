@@ -16,10 +16,16 @@ class _PrivatStub:
 
 class _CheckGovStub:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, bool]] = []
+        self.calls: list[tuple[str, str, bool, str | None]] = []
 
-    def check(self, provider_code: str, receipt_code: str, reload_before_check: bool = False) -> CheckResult:
-        self.calls.append((provider_code, receipt_code, reload_before_check))
+    def check(
+        self,
+        provider_code: str,
+        receipt_code: str,
+        reload_before_check: bool = False,
+        user_scope: str | None = None,
+    ) -> CheckResult:
+        self.calls.append((provider_code, receipt_code, reload_before_check, user_scope))
         return CheckResult(
             status=CheckStatus.VALID,
             source="check.gov.ua",
@@ -61,7 +67,7 @@ class BotRunCheckTests(unittest.TestCase):
         result = ReceiptBot._run_check_for_active_orders(bot_like, parsed)
 
         self.assertEqual(result.status, CheckStatus.VALID)
-        self.assertEqual(check_gov.calls, [("monobank", "9B1K-AKB5-C1MP-26B6", True)])
+        self.assertEqual(check_gov.calls, [("monobank", "9B1K-AKB5-C1MP-26B6", True, None)])
 
 
 if __name__ == "__main__":

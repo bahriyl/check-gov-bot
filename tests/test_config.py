@@ -12,6 +12,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.ocr_provider, "paddle")
         self.assertEqual(settings.docai_timeout_seconds, 30)
         self.assertEqual(settings.binance_test_non_active_order_numbers, [])
+        self.assertEqual(settings.bot_handler_workers, 8)
+        self.assertEqual(settings.checkgov_global_parallel_limit, 8)
+        self.assertEqual(settings.checkgov_per_user_parallel_limit, 2)
 
     @patch.dict(
         os.environ,
@@ -50,6 +53,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.ocr_provider, "docai")
         self.assertEqual(settings.docai_timeout_seconds, 45)
         self.assertEqual(settings.docai_location, "us")
+
+    @patch.dict(os.environ, {"BOT_TOKEN": "tkn", "BOT_HANDLER_WORKERS": "0"}, clear=True)
+    def test_invalid_bot_handler_workers_raises(self) -> None:
+        with self.assertRaises(RuntimeError):
+            load_settings()
+
+    @patch.dict(os.environ, {"BOT_TOKEN": "tkn", "CHECKGOV_GLOBAL_PARALLEL_LIMIT": "0"}, clear=True)
+    def test_invalid_global_parallel_limit_raises(self) -> None:
+        with self.assertRaises(RuntimeError):
+            load_settings()
 
 
 if __name__ == "__main__":

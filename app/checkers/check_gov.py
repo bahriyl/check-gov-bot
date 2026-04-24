@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import atexit
-from threading import Lock
 from typing import Any
 
-from playwright.sync_api import sync_playwright
+from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
+from app.async_runner import AsyncLoopRunner
 from app.payment_data import parse_check_gov_payment
 from app.types import CheckResult, CheckStatus
 
@@ -14,31 +15,53 @@ class CheckGovChecker:
     CHECK_URL = "https://check.gov.ua/api/handler"
     CHECK_PAGE = "https://check.gov.ua/"
 
-    def __init__(self, headless: bool = True, timeout_seconds: int = 20) -> None:
+    def __init__(
+        self,
+        headless: bool = True,
+        timeout_seconds: int = 20,
+        global_parallel_limit: int = 8,
+        per_user_parallel_limit: int = 2,
+    ) -> None:
         self.headless = headless
         self.timeout_seconds = timeout_seconds
-        self._lock = Lock()
-        self._playwright = None
-        self._browser = None
-        self._context = None
-        self._page = None
-        atexit.register(self.close)
+        self.global_parallel_limit = max(1, int(global_parallel_limit))
+        self.per_user_parallel_limit = max(1, int(per_user_parallel_limit))
 
-    def _ensure_session(self) -> None:
-        if self._page:
-            return
+        self._runner = AsyncLoopRunner("checkgov-playwright-loop")
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._session_lock: asyncio.Lock | None = None
+        self._global_limiter: asyncio.Semaphore | None = None
+        self._user_limiters: dict[str, asyncio.Semaphore] = {}
+        atexit.register(self.shutdown)
 
-        self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=self.headless)
-        self._context = self._browser.new_context()
+    def _timeout_ms(self) -> int:
+        return self.timeout_seconds * 1000
 
-        # Block non-essential resources to speed up page warmup and runtime.
-        self._context.route(
-            "**/*",
-            lambda route: route.abort()
-            if route.request.resource_type in {"image", "font", "media"}
-            or any(
-                blocked in route.request.url
+    async def _ensure_async_state(self) -> None:
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+        if self._global_limiter is None:
+            self._global_limiter = asyncio.Semaphore(self.global_parallel_limit)
+
+    async def _ensure_session(self) -> None:
+        await self._ensure_async_state()
+        assert self._session_lock is not None
+        async with self._session_lock:
+            if self._browser:
+                return
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(headless=self.headless)
+
+    async def _create_context(self) -> BrowserContext:
+        await self._ensure_session()
+        assert self._browser is not None
+        context = await self._browser.new_context()
+
+        async def _route_handler(route) -> None:
+            req = route.request
+            if req.resource_type in {"image", "font", "media"} or any(
+                blocked in req.url
                 for blocked in (
                     "googletagmanager",
                     "google-analytics",
@@ -46,46 +69,42 @@ class CheckGovChecker:
                     "facebook.net",
                     "tiktok.com",
                 )
-            )
-            else route.continue_(),
-        )
+            ):
+                await route.abort()
+                return
+            await route.continue_()
 
-        self._page = self._context.new_page()
-        # Warm up once; further checks reuse loaded page/session.
-        self._page.goto(self.CHECK_PAGE, wait_until="domcontentloaded", timeout=self.timeout_seconds * 1000)
-        self._page.wait_for_function(
-            "() => !!(window.grecaptcha && window.grecaptcha.execute && window.conf)",
-            timeout=self.timeout_seconds * 1000,
-        )
+        await context.route("**/*", _route_handler)
+        return context
 
-    def _human_pause(self, ms: int) -> None:
-        self._page.wait_for_timeout(ms)
+    async def _human_pause(self, page: Page, ms: int) -> None:
+        await page.wait_for_timeout(ms)
 
-    def _human_click(self, locator, *, force: bool = False) -> None:
-        locator.wait_for(state="visible", timeout=self.timeout_seconds * 1000)
+    async def _human_click(self, page: Page, locator, *, force: bool = False) -> None:
+        await locator.wait_for(state="visible", timeout=self._timeout_ms())
         try:
-            locator.scroll_into_view_if_needed(timeout=self.timeout_seconds * 1000)
+            await locator.scroll_into_view_if_needed(timeout=self._timeout_ms())
         except Exception:
             pass
-        box = locator.bounding_box()
+        box = await locator.bounding_box()
         if not box:
-            locator.click(force=force, timeout=self.timeout_seconds * 1000)
+            await locator.click(force=force, timeout=self._timeout_ms())
             return
         target_x = box["x"] + box["width"] * 0.5
         target_y = box["y"] + box["height"] * 0.5
         approach_x = max(1, target_x - min(40, box["width"] * 0.4))
         approach_y = max(1, target_y - min(14, box["height"] * 0.3))
-        self._page.mouse.move(approach_x, approach_y, steps=5)
-        self._human_pause(25)
-        self._page.mouse.move(target_x, target_y, steps=8)
-        self._human_pause(35)
-        self._page.mouse.down()
-        self._human_pause(28)
-        self._page.mouse.up()
-        self._human_pause(45)
+        await page.mouse.move(approach_x, approach_y, steps=5)
+        await self._human_pause(page, 25)
+        await page.mouse.move(target_x, target_y, steps=8)
+        await self._human_pause(page, 35)
+        await page.mouse.down()
+        await self._human_pause(page, 28)
+        await page.mouse.up()
+        await self._human_pause(page, 45)
 
-    def _resolve_provider_target(self, provider_code: str) -> dict[str, Any]:
-        return self._page.evaluate(
+    async def _resolve_provider_target(self, page: Page, provider_code: str) -> dict[str, Any]:
+        return await page.evaluate(
             """
             ({ providerCode }) => {
               const normalize = (value) => String(value || '').trim().toLowerCase();
@@ -136,13 +155,13 @@ class CheckGovChecker:
             {"providerCode": provider_code},
         )
 
-    def _prepare_form(self, provider_code: str, receipt_code: str) -> None:
-        target = self._resolve_provider_target(provider_code)
+    async def _prepare_form(self, page: Page, provider_code: str, receipt_code: str) -> None:
+        target = await self._resolve_provider_target(page, provider_code)
         selected_value = str(target.get("selectedValue") or provider_code or "")
         raw_target_index = target.get("targetIndex")
         target_index = int(raw_target_index) if raw_target_index is not None else -1
 
-        self._page.evaluate(
+        await page.evaluate(
             """
             ({ selectedValue }) => {
               const company = document.getElementById('company');
@@ -156,25 +175,25 @@ class CheckGovChecker:
             {"selectedValue": selected_value},
         )
 
-        opener = self._page.locator("xpath=//*[@id='companyBlock']/div/div[1]")
-        self._human_click(opener)
-        self._human_pause(65)
+        opener = page.locator("xpath=//*[@id='companyBlock']/div/div[1]")
+        await self._human_click(page, opener)
+        await self._human_pause(page, 65)
 
         if target_index >= 0:
-            provider_item = self._page.locator("#companyBlock .selection-list > div").nth(target_index)
-            self._human_click(provider_item)
-        self._human_pause(80)
+            provider_item = page.locator("#companyBlock .selection-list > div").nth(target_index)
+            await self._human_click(page, provider_item)
+        await self._human_pause(page, 80)
 
-        refs = self._page.locator("#references")
-        self._human_click(refs)
-        refs.press("ControlOrMeta+A")
-        self._human_pause(20)
-        refs.press("Backspace")
-        self._human_pause(28)
-        refs.type(receipt_code, delay=52)
-        self._human_pause(42)
+        refs = page.locator("#references")
+        await self._human_click(page, refs)
+        await refs.press("ControlOrMeta+A")
+        await self._human_pause(page, 20)
+        await refs.press("Backspace")
+        await self._human_pause(page, 28)
+        await refs.type(receipt_code, delay=52)
+        await self._human_pause(page, 42)
 
-        self._page.evaluate(
+        await page.evaluate(
             """
             () => {
               const refs = document.getElementById('references');
@@ -184,16 +203,14 @@ class CheckGovChecker:
               refs.dispatchEvent(new Event('change', { bubbles: true }));
               refs.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: '0' }));
             }
-            """,
+            """
         )
-        self._human_pause(75)
+        await self._human_pause(page, 75)
 
-    def _submit_form_and_capture(self) -> tuple[int, dict | None, str]:
-        response = None
-        submit_xpath = "//div[@id='submit']"
-        submit = self._page.locator(f"xpath={submit_xpath}")
-        submit.wait_for(state="visible", timeout=self.timeout_seconds * 1000)
-        self._page.wait_for_function(
+    async def _submit_form_and_capture(self, page: Page) -> tuple[int, dict | None, str]:
+        submit = page.locator("xpath=//div[@id='submit']")
+        await submit.wait_for(state="visible", timeout=self._timeout_ms())
+        await page.wait_for_function(
             """
             () => {
               const node = document.getElementById('submit');
@@ -208,23 +225,22 @@ class CheckGovChecker:
               return visible && clickableByStyle && notDisabledClass;
             }
             """,
-            timeout=self.timeout_seconds * 1000,
+            timeout=self._timeout_ms(),
         )
-        with self._page.expect_response(
+        async with page.expect_response(
             lambda r: "/api/handler" in r.url and r.request.method == "POST",
-            timeout=self.timeout_seconds * 1000,
+            timeout=self._timeout_ms(),
         ) as info:
-            # Custom layout overlays pointer targets; fall back to force click if needed.
             try:
-                self._human_click(submit)
+                await self._human_click(page, submit)
             except Exception:
-                submit.click(force=True, timeout=self.timeout_seconds * 1000)
-        response = info.value
+                await submit.click(force=True, timeout=self._timeout_ms())
+        response = await info.value
 
-        text = response.text() or ""
+        text = await response.text() or ""
         data: dict | None = None
         try:
-            parsed = response.json()
+            parsed = await response.json()
             if isinstance(parsed, dict):
                 data = parsed
         except Exception:
@@ -232,8 +248,8 @@ class CheckGovChecker:
 
         return int(response.status), data, text
 
-    def _read_ui_result(self) -> dict[str, Any]:
-        return self._page.evaluate(
+    async def _read_ui_result(self, page: Page) -> dict[str, Any]:
+        return await page.evaluate(
             """
             () => {
               const read = (id) => {
@@ -268,49 +284,86 @@ class CheckGovChecker:
             """
         )
 
-    def _check_in_browser(self, provider_code: str, receipt_code: str) -> tuple[int, dict | None, str]:
-        self._ensure_session()
-        self._page.wait_for_function(
-            "() => !!(window.grecaptcha && window.grecaptcha.execute && window.conf)",
-            timeout=self.timeout_seconds * 1000,
-        )
-        self._page.wait_for_function(
-            """
-            () => {
-              const select = document.getElementById('company');
-              const optionsReady = !!(select && select.options && select.options.length > 1);
-              const listReady = document.querySelectorAll('#companyBlock .selection-list div').length > 0;
-              return optionsReady || listReady;
-            }
-            """,
-            timeout=self.timeout_seconds * 1000,
-        )
-        self._prepare_form(provider_code, receipt_code)
-        status_code, data, raw_text = self._submit_form_and_capture()
-        ui = self._read_ui_result()
+    async def _check_in_browser_async(self, provider_code: str, receipt_code: str) -> tuple[int, dict | None, str]:
+        context = await self._create_context()
+        page = await context.new_page()
+        try:
+            await page.goto(self.CHECK_PAGE, wait_until="domcontentloaded", timeout=self._timeout_ms())
+            await page.wait_for_function(
+                "() => !!(window.grecaptcha && window.grecaptcha.execute && window.conf)",
+                timeout=self._timeout_ms(),
+            )
+            await page.wait_for_function(
+                """
+                () => {
+                  const select = document.getElementById('company');
+                  const optionsReady = !!(select && select.options && select.options.length > 1);
+                  const listReady = document.querySelectorAll('#companyBlock .selection-list div').length > 0;
+                  return optionsReady || listReady;
+                }
+                """,
+                timeout=self._timeout_ms(),
+            )
+            await self._prepare_form(page, provider_code, receipt_code)
+            status_code, data, raw_text = await self._submit_form_and_capture(page)
+            ui = await self._read_ui_result(page)
+            out = dict(data) if isinstance(data, dict) else {}
+            out["ui"] = ui
+            return status_code, out, raw_text
+        finally:
+            await context.close()
 
-        out = dict(data) if isinstance(data, dict) else {}
-        out["ui"] = ui
-        return status_code, out, raw_text
+    async def _reload_page_async(self) -> None:
+        context = await self._create_context()
+        page = await context.new_page()
+        try:
+            await page.goto(self.CHECK_PAGE, wait_until="domcontentloaded", timeout=self._timeout_ms())
+            await page.wait_for_function(
+                "() => !!(window.grecaptcha && window.grecaptcha.execute && window.conf)",
+                timeout=self._timeout_ms(),
+            )
+            await page.wait_for_function(
+                """
+                () => {
+                  const select = document.getElementById('company');
+                  const optionsReady = !!(select && select.options && select.options.length > 1);
+                  const listReady = document.querySelectorAll('#companyBlock .selection-list div').length > 0;
+                  return optionsReady || listReady;
+                }
+                """,
+                timeout=self._timeout_ms(),
+            )
+        finally:
+            await context.close()
+
+    async def _run_with_limits_async(
+        self,
+        provider_code: str,
+        receipt_code: str,
+        user_scope: str | None,
+    ) -> tuple[int, dict | None, str]:
+        await self._ensure_async_state()
+        assert self._global_limiter is not None
+
+        user_key = (user_scope or "anon").strip() or "anon"
+        user_limiter = self._user_limiters.get(user_key)
+        if user_limiter is None:
+            user_limiter = asyncio.Semaphore(self.per_user_parallel_limit)
+            self._user_limiters[user_key] = user_limiter
+
+        await self._global_limiter.acquire()
+        await user_limiter.acquire()
+        try:
+            return await self._check_in_browser_async(provider_code, receipt_code)
+        finally:
+            user_limiter.release()
+            self._global_limiter.release()
+
+    def _check_in_browser(self, provider_code: str, receipt_code: str, user_scope: str | None = None) -> tuple[int, dict | None, str]:
+        return self._runner.run(self._run_with_limits_async(provider_code, receipt_code, user_scope))
 
     def _reload_page(self) -> None:
-        self._ensure_session()
-        self._page.goto(self.CHECK_PAGE, wait_until="domcontentloaded", timeout=self.timeout_seconds * 1000)
-        self._page.wait_for_function(
-            "() => !!(window.grecaptcha && window.grecaptcha.execute && window.conf)",
-            timeout=self.timeout_seconds * 1000,
-        )
-        self._page.wait_for_function(
-            """
-            () => {
-              const select = document.getElementById('company');
-              const optionsReady = !!(select && select.options && select.options.length > 1);
-              const listReady = document.querySelectorAll('#companyBlock .selection-list div').length > 0;
-              return optionsReady || listReady;
-            }
-            """,
-            timeout=self.timeout_seconds * 1000,
-        )
+        self._runner.run(self._reload_page_async())
 
     @staticmethod
     def _is_retryable_einfo(data: dict | None) -> bool:
@@ -320,7 +373,13 @@ class CheckGovChecker:
         text = str(data.get("textUk") or "").lower()
         return "internal" in info or "error" in info or "помил" in text
 
-    def check(self, provider_code: str, receipt_code: str, reload_before_check: bool = False) -> CheckResult:
+    def check(
+        self,
+        provider_code: str,
+        receipt_code: str,
+        reload_before_check: bool = False,
+        user_scope: str | None = None,
+    ) -> CheckResult:
         last_result: tuple[int, dict | None, str] | None = None
         max_total_attempts = 2
         attempts = 0
@@ -337,12 +396,10 @@ class CheckGovChecker:
                 break
             attempts += 1
             try:
-                with self._lock:
-                    if reload_before_check:
-                        self._reload_page()
-                    status_code, data, raw_text = self._check_in_browser(current_provider, receipt_code)
+                if reload_before_check:
+                    self._reload_page()
+                status_code, data, raw_text = self._check_in_browser(current_provider, receipt_code, user_scope=user_scope)
             except Exception as exc:
-                # Force session reset on unexpected browser errors and retry once.
                 self.close()
                 if attempts < max_total_attempts:
                     continue
@@ -435,28 +492,28 @@ class CheckGovChecker:
             | {"http_status": status_code},
         )
 
+    async def _close_session_async(self) -> None:
+        await self._ensure_async_state()
+        assert self._session_lock is not None
+        async with self._session_lock:
+            if self._browser:
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
+                self._browser = None
+            if self._playwright:
+                try:
+                    await self._playwright.stop()
+                except Exception:
+                    pass
+                self._playwright = None
+
     def close(self) -> None:
-        if self._page:
-            try:
-                self._page.close()
-            except Exception:
-                pass
-            self._page = None
-        if self._context:
-            try:
-                self._context.close()
-            except Exception:
-                pass
-            self._context = None
-        if self._browser:
-            try:
-                self._browser.close()
-            except Exception:
-                pass
-            self._browser = None
-        if self._playwright:
-            try:
-                self._playwright.stop()
-            except Exception:
-                pass
-            self._playwright = None
+        self._runner.run(self._close_session_async())
+
+    def shutdown(self) -> None:
+        try:
+            self.close()
+        finally:
+            self._runner.close()

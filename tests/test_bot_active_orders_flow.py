@@ -1,8 +1,9 @@
 import unittest
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.bot import ReceiptBot
+from app.bot import ActiveOrdersState, ReceiptBot
 from app.ocr import OCRError
 from app.types import CheckResult, CheckStatus, ParsedReceipt
 
@@ -12,6 +13,7 @@ class _FakeTeleBot:
         self.sent_messages: list[dict] = []
         self.answered_callbacks: list[tuple[str, str]] = []
         self.deleted_messages: list[tuple[int, int]] = []
+        self.replies: list[dict] = []
 
     def send_message(
         self,
@@ -36,8 +38,8 @@ class _FakeTeleBot:
     def delete_message(self, chat_id: int, message_id: int) -> None:
         self.deleted_messages.append((chat_id, message_id))
 
-    def reply_to(self, *_args, **_kwargs) -> None:
-        raise AssertionError("reply_to should not be called in these tests")
+    def reply_to(self, message, text: str, reply_markup=None) -> None:
+        self.replies.append({"message": message, "text": text, "reply_markup": reply_markup})
 
 
 class _FakeProviders:
@@ -63,6 +65,8 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
         bot = ReceiptBot.__new__(ReceiptBot)
         fake_telebot = _FakeTeleBot()
         bot.bot = fake_telebot
+        bot._state_lock = Lock()
+        bot._manual_context = {}
         bot._active_orders_context = {}
         return bot, fake_telebot
 
@@ -170,7 +174,7 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
         bot._close_check_gov_session = lambda: None
         summary_holder: dict[str, str] = {}
         bot._send_long_text = lambda _chat_id, text, **_kwargs: summary_holder.update({"text": text})
-        bot._run_check_for_active_orders = lambda _parsed: CheckResult(
+        bot._run_check_for_active_orders = lambda _parsed, **_kwargs: CheckResult(
             status=CheckStatus.VALID,
             source="check.gov.ua",
             message="ok",
@@ -235,6 +239,24 @@ class BotActiveOrdersFlowTests(unittest.TestCase):
         line = bot._format_active_orders_line(parsed, result, "fallback")
 
         self.assertIn("| CHECK_ERROR | Нестабільна відповідь сервісу", line)
+
+    def test_handle_orders_scan_rejects_parallel_run_for_same_user(self) -> None:
+        bot, fake_telebot = self._build_bot()
+        bot.providers = _FakeProviders()
+        bot.settings = SimpleNamespace(binance_test_non_active_order_numbers=[])
+        bot.binance_client = _FakeBinanceClient([])
+        key = (777, 9)
+        bot._active_orders_context[key] = ActiveOrdersState(
+            source_message=SimpleNamespace(chat=SimpleNamespace(id=777), message_id=1),
+            test_mode=False,
+            tasks=[],
+        )
+        message = SimpleNamespace(chat=SimpleNamespace(id=777), message_id=99, from_user=SimpleNamespace(id=9))
+
+        bot._handle_orders_scan(message, test_mode=False, trade_type_filter=None)
+
+        self.assertEqual(len(fake_telebot.replies), 1)
+        self.assertIn("вже виконується", fake_telebot.replies[0]["text"])
 
 
 if __name__ == "__main__":
